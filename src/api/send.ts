@@ -196,6 +196,68 @@ function buildEml(
   return lines.join("\r\n");
 }
 
+/**
+ * Per-mailbox send rate limit. Conservative cap kept well under the cf-email
+ * domain hard ceiling of 1000/day/domain (spec §2c) so a single mailbox — or a
+ * stuck client retry loop — cannot exhaust the whole domain's deliverability
+ * budget. KV is eventually-consistent → this is a soft cost/abuse guardrail.
+ */
+const SEND_RATE_LIMIT_MAX = 100;
+const SEND_RATE_LIMIT_WINDOW_SECONDS = 3600;
+
+function sendRateKey(mailboxId: string, windowStart: number): string {
+  return `send_rl:${mailboxId}:${windowStart}`;
+}
+
+/**
+ * Reserve one send slot for the mailbox (fixed-window counter in KV).
+ * Returns false only when the limit is positively known to be exceeded; any KV
+ * failure fails OPEN (logged) so a limiter outage never blocks a legitimate send.
+ */
+async function allowSend(env: Env, mailboxId: string): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = now - (now % SEND_RATE_LIMIT_WINDOW_SECONDS);
+  const key = sendRateKey(mailboxId, windowStart);
+
+  let count = 0;
+  try {
+    const raw = await env.MAIL_KV.get(key);
+    count = raw ? Number.parseInt(raw, 10) || 0 : 0;
+  } catch (err) {
+    console.error("send rate-limit read failed", err);
+    return true;
+  }
+  if (count >= SEND_RATE_LIMIT_MAX) return false;
+  try {
+    await env.MAIL_KV.put(key, String(count + 1), {
+      expirationTtl: SEND_RATE_LIMIT_WINDOW_SECONDS * 2,
+    });
+  } catch (err) {
+    console.error("send rate-limit write failed", err);
+  }
+  return true;
+}
+
+/** KV key mapping a client Idempotency-Key → its prior send result. */
+function idemKey(mailboxId: string, clientKey: string): string {
+  return `send_idem:${mailboxId}:${clientKey}`;
+}
+
+/** Read a prior idempotent result, tolerating KV/parse failure (returns null). */
+async function readIdem(
+  env: Env,
+  mailboxId: string,
+  clientKey: string,
+): Promise<{ id: string; status: string } | null> {
+  try {
+    const raw = await env.MAIL_KV.get(idemKey(mailboxId, clientKey));
+    if (!raw) return null;
+    return JSON.parse(raw) as { id: string; status: string };
+  } catch {
+    return null;
+  }
+}
+
 /** Build the send sub-router. Owns POST /send. */
 export function sendRoutes(): Hono<AccessEnv> {
   const app = new Hono<AccessEnv>();
@@ -224,6 +286,24 @@ export function sendRoutes(): Hono<AccessEnv> {
     const validated = validate(raw);
     if ("error" in validated) {
       return c.json({ error: validated.error }, 400);
+    }
+
+    // Idempotency (optional): replay a prior result for the same client key so a
+    // retry loop cannot multiply real sends against the 1000/day domain cap.
+    const clientIdemKey = (c.req.header("Idempotency-Key") ?? "").trim();
+    if (clientIdemKey) {
+      const prior = await readIdem(c.env, mailbox.id, clientIdemKey);
+      if (prior) {
+        return c.json({ ok: true, id: prior.id, status: prior.status }, 200);
+      }
+    }
+
+    // Rate limit: reserve a per-mailbox send slot before contacting the relay.
+    if (!(await allowSend(c.env, mailbox.id))) {
+      return c.json(
+        { error: "Send rate limit reached for this mailbox. Try again later." },
+        429,
+      );
     }
 
     const ip = c.req.header("CF-Connecting-IP") ?? null;
@@ -377,6 +457,19 @@ export function sendRoutes(): Hono<AccessEnv> {
         providerId: result.id,
         messageId: messageRowId,
       });
+    }
+
+    // Record the idempotent result so a replayed key returns this same outcome.
+    if (clientIdemKey) {
+      try {
+        await c.env.MAIL_KV.put(
+          idemKey(mailbox.id, clientIdemKey),
+          JSON.stringify({ id: result.id, status: result.status }),
+          { expirationTtl: 24 * 3600 },
+        );
+      } catch {
+        // Idempotency persistence is best-effort; never fail a sent message on it.
+      }
     }
 
     return c.json({

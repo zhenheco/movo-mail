@@ -101,12 +101,26 @@ function threadWith(messageId: string, references: string | null) {
   };
 }
 
-/** A minimal Env (only MAIL_R2.put is read by the success path). */
-function makeEnv(): Env {
+/** A minimal in-memory KV that honours get/put (the bits the route uses). */
+function memKv(): KVNamespace {
+  const store = new Map<string, string>();
+  return {
+    get: vi.fn(async (k: string) => store.get(k) ?? null),
+    put: vi.fn(async (k: string, v: string) => {
+      store.set(k, v);
+    }),
+    delete: vi.fn(async (k: string) => {
+      store.delete(k);
+    }),
+  } as unknown as KVNamespace;
+}
+
+/** A minimal Env. `kv` lets a test supply a working KV (rate-limit/idempotency). */
+function makeEnv(kv?: KVNamespace): Env {
   return {
     DB: {} as unknown as D1Database,
     MAIL_R2: { put: vi.fn(async () => undefined) } as unknown as R2Bucket,
-    MAIL_KV: {} as unknown as KVNamespace,
+    MAIL_KV: kv ?? ({} as unknown as KVNamespace),
     ASSETS: {} as unknown as Fetcher,
     CF_EMAIL_ENDPOINT: "https://cf-email.example.workers.dev",
     CF_EMAIL_API_KEY: "cfes_test_key",
@@ -401,5 +415,54 @@ describe("POST /send", () => {
     );
     expect(res.status).toBe(403);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rate-limits the mailbox: returns 429 once the per-mailbox cap is hit", async () => {
+    // Pre-seed the KV counter at the cap so the next send is rejected.
+    const kv = memKv();
+    const now = Math.floor(Date.now() / 1000);
+    const windowStart = now - (now % 3600);
+    await kv.put(`send_rl:${MAILBOX.id}:${windowStart}`, "100");
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "x" }),
+      makeEnv(kv),
+    );
+
+    expect(res.status).toBe(429);
+    expect(fetchMock).not.toHaveBeenCalled(); // never reaches the relay
+  });
+
+  it("replays a prior result for a repeated Idempotency-Key without re-sending", async () => {
+    const kv = memKv();
+    const fetchMock = stubRelay(relayOk());
+    const env = makeEnv(kv);
+
+    const req = () =>
+      new Request("http://localhost/send", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "client-key-xyz",
+        },
+        body: JSON.stringify({
+          to: [{ address: "bob@example.com" }],
+          subject: "Hi",
+          text: "hello",
+        }),
+      });
+
+    const first = await makeApp().fetch(req(), env);
+    expect(first.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Same key again → replayed from KV, relay NOT called a second time.
+    const second = await makeApp().fetch(req(), env);
+    expect(second.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = (await second.json()) as { id: string; status: string };
+    expect(body.id).toBe("cfes_msg_1");
+    expect(body.status).toBe("sent");
   });
 });
