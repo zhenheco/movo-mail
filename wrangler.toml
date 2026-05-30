@@ -1,0 +1,84 @@
+name = "movo-mail"
+main = "src/index.ts"
+compatibility_date = "2024-12-05"
+compatibility_flags = ["nodejs_compat"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECRETS (NEVER commit values here — set via `wrangler secret put <NAME>`):
+#   CF_EMAIL_API_KEY        — x-api-key for the cf-email relay Worker
+#   CF_ACCESS_AUD           — Cloudflare Access application AUD tag
+#   CF_ACCESS_TEAM_DOMAIN   — e.g. https://<team>.cloudflareaccess.com
+#   AI_API_KEY              — LLM provider key used by src/lib/ai.ts
+# In CI these are GitHub repo secrets injected at deploy time.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[vars]
+CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "movo-mail"
+database_id = "REPLACE_ME"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MAIL_R2"
+bucket_name = "movo-mail"
+
+[[kv_namespaces]]
+binding = "MAIL_KV"
+id = "REPLACE_ME"
+
+[assets]
+directory = "web/dist"
+binding = "ASSETS"
+
+# ── Staging ──────────────────────────────────────────────────────────────────
+[env.staging]
+name = "movo-mail-staging"
+
+[env.staging.vars]
+CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "movo-mail-staging"
+database_id = "REPLACE_ME"
+migrations_dir = "migrations"
+
+[[env.staging.r2_buckets]]
+binding = "MAIL_R2"
+bucket_name = "movo-mail-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "MAIL_KV"
+id = "REPLACE_ME"
+
+[env.staging.assets]
+directory = "web/dist"
+binding = "ASSETS"
+
+# ── Production ───────────────────────────────────────────────────────────────
+[env.production]
+name = "movo-mail-production"
+
+[env.production.vars]
+CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "movo-mail-production"
+database_id = "REPLACE_ME"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "MAIL_R2"
+bucket_name = "movo-mail-production"
+
+[[env.production.kv_namespaces]]
+binding = "MAIL_KV"
+id = "REPLACE_ME"
+
+[env.production.assets]
+directory = "web/dist"
+binding = "ASSETS"

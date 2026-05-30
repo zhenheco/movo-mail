@@ -1,0 +1,405 @@
+/**
+ * Tests for module: send
+ *   - src/lib/cfemail.ts  (sendViaCfEmail transport)
+ *   - src/api/send.ts     (sendRoutes(): POST /send handler)
+ *
+ * The cf-email relay (global fetch) and the DB layer (../src/db) are mocked.
+ * We assert:
+ *   1. from is enforced to the authenticated user's mailbox address
+ *   2. In-Reply-To / References are derived from the thread being replied to
+ *   3. an idempotencyKey is always present on the relay request
+ *   4. a send_log row is written on success
+ *   5. a suppressed/blocked relay status surfaces a 4xx and logs a failed send
+ *
+ * Signatures mirror the real db contract exactly:
+ *   getThread(env, id)             -> ThreadWithMessages | null
+ *   getMailboxByAddress(env, addr) -> Mailbox | null
+ *   insertOutboundMessage(env, m)  -> Promise<string>
+ *   insertSendLog(env, input)      -> Promise<string>
+ *   insertAudit(env, input)        -> Promise<string>
+ */
+
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { Hono } from "hono";
+
+import type { AccessEnv } from "../src/middleware/access";
+import type { Env, AccessUser, Mailbox, SendRequest, SendResult } from "../src/types";
+
+// ── mock the db contract (env-first signatures, matching src/db/index.ts) ─────
+const getThread = vi.fn((..._args: unknown[]): unknown => null);
+const getMailboxByAddress = vi.fn((..._args: unknown[]): unknown => null);
+const insertOutboundMessage = vi.fn(async (..._args: unknown[]): Promise<string> => "msg-row-1");
+const insertSendLog = vi.fn(async (..._args: unknown[]): Promise<string> => "send-log-1");
+const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit-1");
+
+vi.mock("../src/db", () => ({
+  getThread: (...a: unknown[]) => getThread(...a),
+  getMailboxByAddress: (...a: unknown[]) => getMailboxByAddress(...a),
+  insertOutboundMessage: (...a: unknown[]) => insertOutboundMessage(...a),
+  insertSendLog: (...a: unknown[]) => insertSendLog(...a),
+  insertAudit: (...a: unknown[]) => insertAudit(...a),
+}));
+
+// imported AFTER vi.mock so the route picks up the mocked db
+const { sendRoutes } = await import("../src/api/send");
+import { sendViaCfEmail } from "../src/lib/cfemail";
+
+// ── fixtures ──────────────────────────────────────────────────────────────
+const USER: AccessUser = {
+  sub: "usr_alice",
+  email: "alice@movo.com.my",
+  name: "Alice",
+};
+
+const MAILBOX: Mailbox = {
+  id: "mbx_alice",
+  address: "alice@movo.com.my",
+  display_name: "Alice",
+  owner_id: "usr_alice",
+  created_at: 0,
+  updated_at: 0,
+};
+
+/** A ThreadWithMessages-shaped reply target (one inbound message). */
+function threadWith(messageId: string, references: string | null) {
+  return {
+    id: "thr_1",
+    mailbox_id: MAILBOX.id,
+    subject: "Order #1",
+    snippet: "hi",
+    last_message_at: 100,
+    message_count: 1,
+    unread: 0,
+    created_at: 1,
+    updated_at: 1,
+    messages: [
+      {
+        id: "m1",
+        thread_id: "thr_1",
+        mailbox_id: MAILBOX.id,
+        message_id: messageId,
+        in_reply_to: null,
+        references,
+        direction: "inbound",
+        from_address: "bob@example.com",
+        from_name: "Bob",
+        to_addresses: JSON.stringify(["alice@movo.com.my"]),
+        cc_addresses: null,
+        bcc_addresses: null,
+        subject: "Order #1",
+        snippet: "hi",
+        text_body: "hi",
+        html_body: null,
+        r2_raw_key: null,
+        has_attachments: 0,
+        unread: 0,
+        date: 100,
+        created_at: 1,
+        attachments: [],
+      },
+    ],
+  };
+}
+
+/** A minimal Env (only MAIL_R2.put is read by the success path). */
+function makeEnv(): Env {
+  return {
+    DB: {} as unknown as D1Database,
+    MAIL_R2: { put: vi.fn(async () => undefined) } as unknown as R2Bucket,
+    MAIL_KV: {} as unknown as KVNamespace,
+    ASSETS: {} as unknown as Fetcher,
+    CF_EMAIL_ENDPOINT: "https://cf-email.example.workers.dev",
+    CF_EMAIL_API_KEY: "cfes_test_key",
+    CF_ACCESS_AUD: "aud",
+    CF_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    AI_API_KEY: "ai_test_key",
+  };
+}
+
+/** Mount sendRoutes() behind a middleware that injects the authenticated user. */
+function makeApp(): Hono<AccessEnv> {
+  const app = new Hono<AccessEnv>();
+  app.use("*", async (c, next) => {
+    c.set("user", USER);
+    await next();
+  });
+  app.route("/", sendRoutes());
+  return app;
+}
+
+/** A typed fetch mock; stubs global fetch and returns the same mock for reads. */
+function stubRelay(
+  responder: () => Response,
+): ReturnType<typeof vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>> {
+  const mock = vi.fn(async (_input: unknown, _init?: RequestInit) => responder());
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
+/** Read the JSON body sent on the n-th relay call. */
+function sentBody(
+  mock: ReturnType<typeof stubRelay>,
+  n = 0,
+): Record<string, unknown> {
+  const call = mock.mock.calls[n];
+  if (!call) throw new Error(`no relay call at index ${n}`);
+  return JSON.parse(String(call[1]?.body)) as Record<string, unknown>;
+}
+
+const relayOk = (status = "sent") => (): Response =>
+  new Response(JSON.stringify({ id: "cfes_msg_1", status }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+
+function postBody(body: unknown): Request {
+  return new Request("http://localhost/send", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  getThread.mockReset();
+  getMailboxByAddress.mockReset();
+  insertOutboundMessage.mockClear();
+  insertSendLog.mockClear();
+  insertAudit.mockClear();
+  insertOutboundMessage.mockResolvedValue("msg-row-1");
+  insertSendLog.mockResolvedValue("send-log-1");
+  insertAudit.mockResolvedValue("audit-1");
+  getThread.mockResolvedValue(null);
+  getMailboxByAddress.mockResolvedValue(MAILBOX);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// transport: sendViaCfEmail
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sendViaCfEmail", () => {
+  it("POSTs to {endpoint}/send with x-api-key and an idempotencyKey", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    const req: SendRequest = {
+      from: { address: "alice@movo.com.my" },
+      to: [{ address: "bob@example.com" }],
+      subject: "Hi",
+      text: "hello",
+      headers: { "In-Reply-To": "<orig-abc@example.com>" },
+    };
+    const result: SendResult = await sendViaCfEmail(makeEnv(), req);
+    expect(result.status).toBe("sent");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0];
+    expect(call).toBeDefined();
+    expect(String(call?.[0])).toBe("https://cf-email.example.workers.dev/send");
+    const headers = new Headers(call?.[1]?.headers);
+    expect(headers.get("x-api-key")).toBe("cfes_test_key");
+
+    const sent = sentBody(fetchMock);
+    expect(sent.from).toBe("alice@movo.com.my");
+    expect(sent.to).toBe("bob@example.com");
+    expect(typeof sent.idempotencyKey).toBe("string");
+    expect(String(sent.idempotencyKey).length).toBeGreaterThan(0);
+    expect((sent.headers as Record<string, string>)["In-Reply-To"]).toBe(
+      "<orig-abc@example.com>",
+    );
+  });
+
+  it("honors a caller-supplied idempotencyKey", async () => {
+    const fetchMock = stubRelay(relayOk());
+    await sendViaCfEmail(makeEnv(), {
+      from: { address: "alice@movo.com.my" },
+      to: [{ address: "bob@example.com" }],
+      subject: "s",
+      text: "t",
+      idempotencyKey: "fixed-key-123",
+    });
+    expect(sentBody(fetchMock).idempotencyKey).toBe("fixed-key-123");
+  });
+
+  it("treats a non-2xx relay response as a typed failure", async () => {
+    stubRelay(() => new Response(JSON.stringify({ error: "boom" }), { status: 500 }));
+    await expect(
+      sendViaCfEmail(makeEnv(), {
+        from: { address: "alice@movo.com.my" },
+        to: [{ address: "bob@example.com" }],
+        subject: "s",
+        text: "t",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("surfaces network errors as a typed failure", async () => {
+    const mock = vi.fn(async (): Promise<Response> => {
+      throw new TypeError("network down");
+    });
+    vi.stubGlobal("fetch", mock);
+    await expect(
+      sendViaCfEmail(makeEnv(), {
+        from: { address: "alice@movo.com.my" },
+        to: [{ address: "bob@example.com" }],
+        subject: "s",
+        text: "t",
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// route: POST /send
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("POST /send", () => {
+  it("forces from to the caller's mailbox even if a different from is supplied", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        from: { address: "attacker@evil.com" },
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const sent = sentBody(fetchMock);
+    expect(sent.from).toBe("alice@movo.com.my");
+    expect(String(sent.from)).not.toContain("evil.com");
+  });
+
+  it("passes In-Reply-To/References derived from the replied thread", async () => {
+    getThread.mockResolvedValue(
+      threadWith("<orig-abc@example.com>", "<root-1@example.com>"),
+    );
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: thing",
+        text: "reply body",
+        threadId: "thr_1",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getThread).toHaveBeenCalled();
+    const headers = sentBody(fetchMock).headers as Record<string, string>;
+    expect(headers["In-Reply-To"]).toBe("<orig-abc@example.com>");
+    // References = prior chain + the replied message id.
+    expect(headers.References).toContain("<root-1@example.com>");
+    expect(headers.References).toContain("<orig-abc@example.com>");
+  });
+
+  it("does not send threading headers for a brand-new message (no threadId)", async () => {
+    const fetchMock = stubRelay(relayOk());
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "New", text: "x" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(getThread).not.toHaveBeenCalled();
+    const headers = sentBody(fetchMock).headers as Record<string, string> | undefined;
+    expect(headers?.["In-Reply-To"]).toBeUndefined();
+  });
+
+  it("writes a sent send_log row and persists the outbound message on success", async () => {
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "hello" }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertOutboundMessage).toHaveBeenCalledTimes(1);
+    expect(insertSendLog).toHaveBeenCalledTimes(1);
+    const logCall = insertSendLog.mock.calls[0];
+    expect(logCall).toBeDefined();
+    const logArg = logCall?.[1] as {
+      status: string;
+      idempotencyKey: string;
+      providerId: string | null;
+    };
+    expect(logArg.status).toBe("sent");
+    expect(logArg.providerId).toBe("cfes_msg_1");
+    expect(typeof logArg.idempotencyKey).toBe("string");
+    expect(logArg.idempotencyKey.length).toBeGreaterThan(0);
+  });
+
+  it("omits threadId for a brand-new (non-reply) send so the data layer creates a real thread", async () => {
+    // Regression: previously this passed the idempotencyKey as threadId, which
+    // pointed at a non-existent threads row → messages→threads FK violation →
+    // the sent copy was never persisted. The route must now omit threadId so
+    // insertOutboundMessage upserts a real parent thread.
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "New thread", text: "hello" }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertOutboundMessage).toHaveBeenCalledTimes(1);
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as { threadId?: string };
+    expect(arg.threadId).toBeUndefined();
+  });
+
+  it("surfaces a 4xx and logs a failed send when the relay reports suppression", async () => {
+    stubRelay(relayOk("suppressed"));
+
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "blocked@example.com" }], subject: "Hi", text: "hello" }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    // a failed send_log must still be recorded; the message is NOT persisted
+    expect(insertSendLog).toHaveBeenCalledTimes(1);
+    expect(insertOutboundMessage).not.toHaveBeenCalled();
+    const logArg = insertSendLog.mock.calls[0]?.[1] as { status: string };
+    expect(logArg.status).toBe("failed");
+  });
+
+  it("logs a failed send and returns 502 when the relay errors", async () => {
+    stubRelay(() => new Response("err", { status: 500 }));
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "hello" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(502);
+    expect(insertSendLog).toHaveBeenCalledTimes(1);
+    const logArg = insertSendLog.mock.calls[0]?.[1] as { status: string };
+    expect(logArg.status).toBe("failed");
+  });
+
+  it("rejects an empty recipient list with 400 and does not call the relay", async () => {
+    const fetchMock = stubRelay(relayOk());
+    const res = await makeApp().fetch(
+      postBody({ to: [], subject: "Hi", text: "x" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 when the caller has no provisioned mailbox", async () => {
+    getMailboxByAddress.mockResolvedValue(null);
+    const fetchMock = stubRelay(relayOk());
+    const res = await makeApp().fetch(
+      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "x" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

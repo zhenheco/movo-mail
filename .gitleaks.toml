@@ -1,0 +1,24 @@
+# gitleaks config for movo-mail.
+# The global pre-commit hook (~/.git-template/hooks/pre-commit) runs
+# `gitleaks protect --staged` using this file when present. CI can also run
+# `gitleaks detect --config .gitleaks.toml`.
+#
+# We extend the default rule set; no custom rules are needed yet. Real secrets
+# live only in `wrangler secret` / GitHub Actions secrets and never in-repo, so
+# the placeholders below are explicitly allow-listed to avoid false positives.
+
+title = "movo-mail gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Scaffold placeholders that are intentionally non-secret"
+regexes = [
+  '''REPLACE_ME''',
+  '''op://[^"'\s]+''',
+]
+paths = [
+  '''package-lock\.json''',
+  '''web/dist/.*''',
+]

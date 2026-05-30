@@ -1,0 +1,34 @@
+/**
+ * Mailbox access-scoping helpers for the read API.
+ *
+ * Every read route must guarantee a user can only ever see data belonging to a
+ * mailbox they own. The authenticated identity (`AccessUser`) is matched to the
+ * mailboxes it owns via `getMailboxesForUser`, and individual resources are
+ * checked against that owned set before any body is returned.
+ *
+ * Helpers here are deliberately small and pure-ish (they only read through the
+ * db contract) so route handlers stay thin and the scoping logic is unit
+ * testable in isolation.
+ */
+
+import type { Env, AccessUser, Mailbox } from "../types";
+import { getMailboxesForUser } from "../db";
+
+/** Resolve the set of mailbox ids the authenticated user is allowed to read. */
+export async function getOwnedMailboxIds(
+  env: Env,
+  user: AccessUser,
+): Promise<ReadonlySet<string>> {
+  const mailboxes = await getMailboxesForUser(env, user.email);
+  return new Set(mailboxes.map((m: Mailbox) => m.id));
+}
+
+/** True when the user owns the given mailbox id. */
+export async function userOwnsMailbox(
+  env: Env,
+  user: AccessUser,
+  mailboxId: string,
+): Promise<boolean> {
+  const owned = await getOwnedMailboxIds(env, user);
+  return owned.has(mailboxId);
+}
