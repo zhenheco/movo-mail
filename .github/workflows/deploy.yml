@@ -5,7 +5,9 @@ name: CI & Deploy
 #                           R2:Edit, Email Routing:Edit, Zone DNS (worker route).
 #   CLOUDFLARE_ACCOUNT_ID — account holding movo.com.my (f9916b95…).
 # Never committed. Deploy no-ops when the token is absent (fork / unset) so CI
-# stays green and the deploy gate only activates once secrets exist.
+# stays green and the deploy gate only activates once the secret exists. The
+# token is mapped to a job-level env var because the `secrets` context is not
+# reliably available in a step-level `if:` — `env` is.
 #
 # Node 24: the db layer + its tests use the built-in node:sqlite module, which
 # is unavailable on Node 20 (introduced 22.5, stable 24). CI must match.
@@ -31,6 +33,7 @@ permissions:
 
 jobs:
   build-and-test:
+    name: Typecheck, Test, Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,10 +47,14 @@ jobs:
       - run: npm run build
 
   deploy-staging:
+    name: Deploy (staging)
     needs: build-and-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -56,22 +63,23 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Deploy to staging
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           npm run build
           npx wrangler deploy --env staging
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Skip notice
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' }}
+        if: env.CLOUDFLARE_API_TOKEN == ''
         run: echo "CLOUDFLARE_API_TOKEN not set — skipping staging deploy (CI gate only)."
 
   deploy-production:
+    name: Deploy (production)
     needs: build-and-test
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -80,10 +88,10 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Deploy to production
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           npm run build
           npx wrangler deploy --env production
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Skip notice
+        if: env.CLOUDFLARE_API_TOKEN == ''
+        run: echo "CLOUDFLARE_API_TOKEN not set — skipping production deploy."
