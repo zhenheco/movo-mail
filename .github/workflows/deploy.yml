@@ -1,9 +1,14 @@
 name: CI & Deploy
 
-# Secrets used here are GitHub repo secrets (Settings → Secrets and variables → Actions):
-#   CLOUDFLARE_API_TOKEN   — scoped to Workers/D1/R2/KV for this account
-# Worker runtime secrets (CF_EMAIL_API_KEY, CF_ACCESS_AUD, CF_ACCESS_TEAM_DOMAIN,
-# AI_API_KEY) are set out-of-band via `wrangler secret put` and are NOT in CI.
+# Secrets are GitHub repo secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN  — scoped: Workers Scripts:Edit, D1:Edit, KV:Edit,
+#                           R2:Edit, Email Routing:Edit, Zone DNS (worker route).
+#   CLOUDFLARE_ACCOUNT_ID — account holding movo.com.my (f9916b95…).
+# Never committed. Deploy no-ops when the token is absent (fork / unset) so CI
+# stays green and the deploy gate only activates once secrets exist.
+#
+# Node 24: the db layer + its tests use the built-in node:sqlite module, which
+# is unavailable on Node 20 (introduced 22.5, stable 24). CI must match.
 
 on:
   push:
@@ -12,18 +17,12 @@ on:
       - "src/**"
       - "web/**"
       - "migrations/**"
-      - "wrangler.toml"
       - "package.json"
       - "package-lock.json"
+      - "wrangler.toml"
       - ".github/workflows/deploy.yml"
   pull_request:
-    paths:
-      - "src/**"
-      - "web/**"
-      - "migrations/**"
-      - "wrangler.toml"
-      - "package.json"
-      - "package-lock.json"
+    branches: [main]
   release:
     types: [published]
 
@@ -31,14 +30,13 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    name: Typecheck, Test, Build
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -46,8 +44,7 @@ jobs:
       - run: npm run build
 
   deploy-staging:
-    name: Deploy (staging)
-    needs: ci
+    needs: build-and-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
@@ -55,21 +52,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run build
-      - name: Deploy to Cloudflare (staging)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          command: deploy --env staging
+      - name: Deploy to staging
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          npm run build
+          npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Skip notice
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' }}
+        run: echo "CLOUDFLARE_API_TOKEN not set — skipping staging deploy (CI gate only)."
 
   deploy-production:
-    name: Deploy (production)
-    needs: ci
-    # Production deploys only on a published GitHub Release/tag, gated by the
-    # 'production' environment protection rules (required reviewers).
+    needs: build-and-test
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: production
@@ -77,12 +76,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run build
-      - name: Deploy to Cloudflare (production)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          command: deploy --env production
+      - name: Deploy to production
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          npm run build
+          npx wrangler deploy --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
