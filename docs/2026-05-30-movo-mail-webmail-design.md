@@ -19,11 +19,11 @@
 
 ## 2. 發信引擎：全走既有 cf-email Worker（MailChannels），不接 Resend
 
-zhenheco 已有中央交易郵件中繼 **cf-email Worker**（`https://cf-email.zhenhe-co.workers.dev/send`），底層 = **MailChannels API**（CF Workers 的官方寄信路徑）。本專案**所有出站信都打 cf-email Worker**，符合全域 `cf-email-sdk` 標準（idempotency / suppression / webhook / D1 log 集中）。
+zhenheco 已有中央交易郵件中繼 **cf-email Worker**（`https://cf-email.acejou27.workers.dev`），底層 = **Cloudflare Email Routing `send_email` binding**（非 MailChannels、非 Resend）。本專案所有出站信都打它，符合全域 `cf-email-sdk` 標準（idempotency / suppression / webhook / D1 log 集中）。
 
-- `POST /send`：`{ to, from, idempotencyKey(uuid), subject, html, text, headers? }`
-- 需把 `In-Reply-To` / `References` 帶進去做 threading（確認 cf-email 支援 custom headers；不支援則補一個 passthrough 欄位）。
-- **不在本 repo 放任何 ESP key**（MailChannels 認證集中在 cf-email Worker）。
+- `POST /send`，header `X-API-Key: cfes_…`（env 名 `CF_EMAIL_API_KEY`），body `{ to, from, subject, html, text, tags? }` + `Idempotency-Key` header。`tags` 是 `string[]`。
+- **本 repo 零 ESP/寄信 key**（認證集中在 cf-email Worker）。
+- ⚠️ **cf-email 現況硬限制**（見 cf-email-sdk skill）：(a) **不支援 attachments**；(b) **不支援 custom headers** → 無法帶 `In-Reply-To`/`References`，**outbound threading 無法原生串**；(c) **1000 封/天/domain**（CF Email beta 硬限）；(d) `to` 限單一純 email、`from` display name 會被剝。→ 見 §11 決策。
 
 ---
 
@@ -39,13 +39,15 @@ zhenheco 已有中央交易郵件中繼 **cf-email Worker**（`https://cf-email.
 
 ## 4. DNS / 認證地基（movo.com.my 在我們 CF，全可 API 設）
 
+movo.com.my 在我們 CF（acejou27 帳號，Email Routing 已啟用 = 現有 MX）。cf-email 用 CF Email Routing `send_email`，**SPF 現況已足夠**。
+
 - **保留** root MX = CF Email Routing（Stream 2 收信）。
-- **SPF**（root）：`v=spf1 include:_spf.mx.cloudflare.net include:relay.mailchannels.net ~all`（加 MailChannels）。
-- **MailChannels Domain Lockdown**：`_mailchannels.movo.com.my TXT = "v=mc1 cfid=zhenhe-co.workers.dev"`（授權 cf-email Worker 以 movo.com.my 寄出）。
-- **DKIM**：產 key → 公開 `mailchannels._domainkey.movo.com.my TXT`，私鑰放 cf-email Worker secret（簽 `d=movo.com.my`）。確認 cf-email Worker 是否 per-domain DKIM；若是單一 key 則用其既有 selector。
-- **DMARC** 維持 `p=reject`（MailChannels DKIM 對齊即過）；過渡可先 `p=quarantine` + `rua` 觀察 1-2 週再回 reject。
+- **SPF**：`v=spf1 include:_spf.mx.cloudflare.net ~all` 已涵蓋 CF 寄出，**不需改**。
+- **DKIM**：CF Email Routing 自管（須確認 movo.com.my 在 cf-email Worker 所屬帳號已加為『可發送 / verified』domain；同 acejou27 帳號應可直接加白）。
+- **DMARC** 維持 `p=reject`（CF 簽 DKIM 對齊即過）；過渡可先 `p=quarantine` + `rua` 觀察 1-2 週。
+- **不需** MailChannels / Resend 任何 DNS 記錄（v1 草稿寫錯，撤回）。
 - 清理：`brevo-code` TXT 若 Brevo 只作 Phase 5 行銷則暫留，否則刪。
-- 驗證：mail-tester（目標 10/10）+ MXToolbox + 寄 Gmail 看 `dkim=pass dmarc=pass`。
+- 驗證：寄 Gmail 看 `dkim=pass dmarc=pass` + mail-tester。
 
 ---
 
@@ -136,8 +138,11 @@ zhenheco 已有中央交易郵件中繼 **cf-email Worker**（`https://cf-email.
 
 ## 11. Open questions
 
-- cf-email Worker 是否支援 custom headers（In-Reply-To/References）+ movo.com.my from-domain？（讀 cf-email repo 確認；不支援則先補 cf-email passthrough）
-- MailChannels 帳號付費方案是否 active（2024-06 起收費）？其他品牌已在用 → 應 OK，仍須確認 movo.com.my 已加白。
+- **【重要決策】cf-email 限制怎麼處理**：cf-email 現**不支援 attachments + custom headers(In-Reply-To)**。
+  - **選項 A（v1 快速上線）**：接受限制 — webmail 可寄純文字/HTML，**不能寄附件**、**回信不串原 thread**（收件端視為新信）。AI 代寫代發純文字客服信 OK。
+  - **選項 B（擴充中央服務）**：去 `Waiting projects/cf email` repo 擴 `/send` 支援 `attachments`(base64) + `headers`(In-Reply-To/References) + 擴 `email_logs` schema + SDK。一次做全品牌受惠，但動到中央 transactional 服務、要 TDD + 不可破壞現有 caller。
+  - 建議：**v1 走 A 先上線**，B 排後續 milestone。 → ✅ **已選 A（2026-05-30）**：webmail v1 寄純文字/HTML、無附件、回信不串 thread；附件 + threading 留 B（擴中央 cf-email）排後續。
+- movo.com.my 是否已在 cf-email Worker 帳號設為『可發送 domain』？（同 acejou27 帳號，須確認/加白）
 - DMARC 過渡先 quarantine？（建議 yes）
 - AI 代發 Phase 4 是否永久強制人工核可。
 - webmail 自訂網域：`mail.movo.com.my`（Worker route，zone 我們的）。
