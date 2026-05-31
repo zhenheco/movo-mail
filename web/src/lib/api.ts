@@ -85,15 +85,20 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    // Try to surface a server-provided error string, else fall back.
+    // Surface a server-provided error string only for 4xx, where the server
+    // intends it to be user-facing. For 5xx the body may carry internal detail
+    // (stack fragments, raw DB messages), so we show only the generic message —
+    // App.tsx renders this verbatim, so it must never leak server internals.
     let serverMessage: string | null = null;
-    try {
-      const data = (await response.json()) as { error?: unknown };
-      if (typeof data.error === "string") {
-        serverMessage = data.error;
+    if (response.status < 500) {
+      try {
+        const data = (await response.json()) as { error?: unknown };
+        if (typeof data.error === "string") {
+          serverMessage = data.error;
+        }
+      } catch {
+        serverMessage = null;
       }
-    } catch {
-      serverMessage = null;
     }
     throw new ApiError(
       serverMessage
@@ -108,6 +113,22 @@ async function request<T>(
   } catch {
     throw new ApiError("The server returned an unreadable response.", response.status);
   }
+}
+
+/** A mailbox the caller owns, as returned by GET /api/mailboxes. */
+export interface MailboxSummary {
+  id: string;
+  address: string;
+  displayName: string | null;
+}
+
+/**
+ * GET /api/mailboxes — the caller's own mailboxes (scoped to the Access
+ * identity). The primary source the UI uses to auto-resolve the active inbox.
+ */
+export async function fetchMailboxes(): Promise<MailboxSummary[]> {
+  const data = await request<{ mailboxes: MailboxSummary[] }>(`/mailboxes`);
+  return data.mailboxes;
 }
 
 /** GET /api/threads?mailbox=<id> */

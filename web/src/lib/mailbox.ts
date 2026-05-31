@@ -1,12 +1,14 @@
 /**
- * Resolve the active mailbox id.
+ * Resolve an OVERRIDE mailbox id.
  *
- * The read API scopes everything to a mailbox id but exposes no mailbox-listing
- * endpoint, so the active mailbox is sourced (in priority order) from:
- *   1. the `?mailbox=` URL query (handy for switching / debugging), then
+ * The primary source of the active mailbox is now the API (GET /api/mailboxes,
+ * via api.fetchMailboxes), which auto-resolves the caller's own inbox so a user
+ * never types an id. This helper provides explicit OVERRIDES only, in priority
+ * order:
+ *   1. the `?mailbox=` URL query (handy for switching between owned mailboxes /
+ *      debugging), then
  *   2. the build-time `VITE_DEFAULT_MAILBOX` env var.
- * Returns null when none is configured so the UI can show a clear message
- * instead of firing requests that would 400.
+ * Returns null when no override is set, so the caller can fall back to the API.
  */
 
 export function resolveMailboxId(
@@ -30,10 +32,12 @@ export function resolveMailboxId(
 }
 
 /**
- * Resolve the From address for outbound sends. There is no mailbox-listing
- * endpoint, so this comes from `VITE_DEFAULT_FROM` (an email like
- * `name@movo.com.my`), falling back to the mailbox id when that already looks
- * like an address.
+ * Resolve a FALLBACK From address for outbound sends.
+ *
+ * The primary From address is the resolved mailbox's `address` (from the API).
+ * This helper is the fallback used only when no resolved address is available:
+ * it reads `VITE_DEFAULT_FROM` (an email like `name@movo.com.my`), then falls
+ * back to the mailbox id when that already looks like an address.
  */
 export function resolveFromAddress(
   env: Record<string, string | undefined>,

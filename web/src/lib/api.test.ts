@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   buildQuery,
+  fetchMailboxes,
   fetchThreads,
   friendlyStatusMessage,
   searchMessages,
@@ -143,6 +144,41 @@ describe("api client fetch", () => {
   });
   afterEach(() => {
     globalThis.fetch = realFetch;
+  });
+
+  it("fetchMailboxes unwraps the mailboxes array on 200", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          mailboxes: [
+            { id: "mb-1", address: "me@movo.com.my", displayName: "Me" },
+            { id: "mb-2", address: "ops@movo.com.my", displayName: null },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const boxes = await fetchMailboxes();
+    expect(boxes.map((m) => m.id)).toEqual(["mb-1", "mb-2"]);
+    expect(boxes[0]?.address).toBe("me@movo.com.my");
+    expect(boxes[1]?.displayName).toBeNull();
+    // Hits the mailbox-listing endpoint under /api.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/mailboxes",
+      expect.anything(),
+    );
+  });
+
+  it("fetchMailboxes throws ApiError on a server error", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "Unable to load mailboxes." }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+    await expect(fetchMailboxes()).rejects.toBeInstanceOf(ApiError);
+    await expect(fetchMailboxes()).rejects.toMatchObject({ status: 500 });
   });
 
   it("fetchThreads returns the threads array on 200", async () => {

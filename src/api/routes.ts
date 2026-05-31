@@ -12,6 +12,7 @@
  *
  * Read routes (all scoped to the authenticated user's mailboxes — see
  * src/api/scope.ts; a user can never read another mailbox's data):
+ *   GET /mailboxes              → { mailboxes: { id, address, displayName }[] }
  *   GET /threads   ?mailbox=    → { threads: Thread[] }
  *   GET /message/:id            → { message: MessageWithAttachments } (sanitized HTML)
  *   GET /search    ?q=&mailbox= → { results: Message[] }
@@ -19,6 +20,7 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
+import { mailboxRoutes } from "./mailboxes";
 import { threadRoutes } from "./threads";
 import { messageRoutes } from "./message";
 import { searchRoutes } from "./search";
@@ -32,6 +34,7 @@ import { aiRoutes } from "./ai";
  */
 export function readRoutes(): Hono<AccessEnv> {
   const app = new Hono<AccessEnv>();
+  app.route("/", mailboxRoutes());
   app.route("/", threadRoutes());
   app.route("/", messageRoutes());
   app.route("/", searchRoutes());

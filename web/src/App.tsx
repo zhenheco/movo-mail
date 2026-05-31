@@ -2,24 +2,46 @@
  * Movo Mail — webmail shell.
  *
  * Three regions: Inbox (ThreadList) | Thread reader (ThreadView) | Compose.
- * The active mailbox is resolved from ?mailbox= or VITE_DEFAULT_MAILBOX.
+ *
+ * Active-mailbox resolution precedence (a logged-in user never types an id):
+ *   1. Override — ?mailbox= URL query or VITE_DEFAULT_MAILBOX (for switching
+ *      between owned mailboxes / debugging). Resolved synchronously.
+ *   2. Otherwise — GET /api/mailboxes on mount and pick the FIRST mailbox the
+ *      caller owns (its id drives the inbox; its address drives the From header).
+ * If the user owns zero mailboxes we show a "contact your administrator" empty
+ * state; on a fetch error we surface the friendly ApiError message.
  *
  * Selection model: the read API exposes /message/:id (not a per-thread list),
  * so the reader is keyed by a message id. Inbox thread rows and search hits both
  * resolve to a message id which ThreadView loads.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageWithAttachments, Thread } from "./lib/types";
 import { resolveFromAddress, resolveMailboxId } from "./lib/mailbox";
+import { ApiError, fetchMailboxes } from "./lib/api";
 import { blankDraft, replyDraft, type ComposeDraft } from "./lib/compose";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { Compose } from "./components/Compose";
 import { EmptyState } from "./components/ui/feedback";
 
+/** Resolved active mailbox: its id (for scoping) + From address (for sends). */
+interface ResolvedMailbox {
+  id: string;
+  address: string;
+}
+
+/** Discriminated state machine for mailbox resolution. */
+type MailboxState =
+  | { status: "loading" }
+  | { status: "resolved"; mailbox: ResolvedMailbox }
+  | { status: "empty" }
+  | { status: "error"; message: string };
+
 export default function App() {
-  const mailboxId = useMemo(
+  // Synchronous override (query / env). When present we skip the API entirely.
+  const override = useMemo(
     () =>
       resolveMailboxId(
         typeof window !== "undefined" ? window.location.search : "",
@@ -28,16 +50,68 @@ export default function App() {
     [],
   );
 
-  const fromAddress = useMemo(
-    () =>
-      mailboxId
-        ? resolveFromAddress(
-            import.meta.env as unknown as Record<string, string | undefined>,
-            mailboxId,
-          )
-        : "",
-    [mailboxId],
+  const [mailboxState, setMailboxState] = useState<MailboxState>(() =>
+    override
+      ? {
+          status: "resolved",
+          mailbox: {
+            id: override,
+            address: resolveFromAddress(
+              import.meta.env as unknown as Record<string, string | undefined>,
+              override,
+            ),
+          },
+        }
+      : { status: "loading" },
   );
+
+  useEffect(() => {
+    // Override already resolved synchronously — no API call needed.
+    if (override) {
+      return;
+    }
+    let cancelled = false;
+    fetchMailboxes()
+      .then((boxes) => {
+        if (cancelled) {
+          return;
+        }
+        const first = boxes[0];
+        if (!first) {
+          setMailboxState({ status: "empty" });
+          return;
+        }
+        setMailboxState({
+          status: "resolved",
+          mailbox: {
+            id: first.id,
+            // Prefer the resolved mailbox address; fall back to env/id.
+            address:
+              first.address ||
+              resolveFromAddress(
+                import.meta.env as unknown as Record<
+                  string,
+                  string | undefined
+                >,
+                first.id,
+              ),
+          },
+        });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : "We could not load your mailboxes. Please reload the page.";
+        setMailboxState({ status: "error", message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [override]);
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [openMessageId, setOpenMessageId] = useState<string | null>(null);
@@ -45,13 +119,32 @@ export default function App() {
   // Bump to force the inbox to re-fetch after a send.
   const [inboxNonce, setInboxNonce] = useState(0);
 
-  if (!mailboxId) {
+  if (mailboxState.status === "loading") {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
-        <EmptyState message="No mailbox is configured. Set VITE_DEFAULT_MAILBOX or append ?mailbox=<id> to the URL." />
+        <EmptyState message="Loading…" />
       </div>
     );
   }
+
+  if (mailboxState.status === "empty") {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
+        <EmptyState message="No mailbox is provisioned for your account. Contact your administrator." />
+      </div>
+    );
+  }
+
+  if (mailboxState.status === "error") {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
+        <EmptyState message={mailboxState.message} />
+      </div>
+    );
+  }
+
+  const mailboxId = mailboxState.mailbox.id;
+  const fromAddress = mailboxState.mailbox.address;
 
   function handleSelectThread(thread: Thread) {
     setSelectedThreadId(thread.id);
@@ -70,7 +163,7 @@ export default function App() {
   }
 
   function handleCompose() {
-    setCompose(blankDraft(mailboxId as string));
+    setCompose(blankDraft(mailboxId));
   }
 
   function handleSent() {
