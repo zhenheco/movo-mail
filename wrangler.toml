@@ -12,6 +12,11 @@ compatibility_flags = ["nodejs_compat"]
 # D1 / KV / R2 resources live on the Cloudflare account holding movo.com.my
 # (acejou27@gmail.com, account f9916b95…). Created 2026-05-31.
 
+# Persistent Workers Logs — query inbound email() failures regardless of tail timing.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
 
