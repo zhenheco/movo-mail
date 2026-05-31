@@ -1,24 +1,24 @@
 name = "movo-mail"
 main = "src/index.ts"
-compatibility_date = "2024-12-05"
+compatibility_date = "2026-01-15"
 compatibility_flags = ["nodejs_compat"]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECRETS (NEVER commit values here — set via `wrangler secret put <NAME>`):
-#   CF_EMAIL_API_KEY        — x-api-key for the cf-email relay Worker
+# Secrets (set via `wrangler secret put`, NEVER committed):
+#   CF_EMAIL_API_KEY        — cf-email relay API key (scope: send)
 #   CF_ACCESS_AUD           — Cloudflare Access application AUD tag
-#   CF_ACCESS_TEAM_DOMAIN   — e.g. https://<team>.cloudflareaccess.com
-#   AI_API_KEY              — LLM provider key used by src/lib/ai.ts
-# In CI these are GitHub repo secrets injected at deploy time.
-# ─────────────────────────────────────────────────────────────────────────────
+#   CF_ACCESS_TEAM_DOMAIN   — e.g. aicycle-dashboard.cloudflareaccess.com
+#   AI_API_KEY              — LLM provider key for AI draft generation
+#
+# D1 / KV / R2 resources live on the Cloudflare account holding movo.com.my
+# (acejou27@gmail.com, account f9916b95…). Created 2026-05-31.
 
 [vars]
-CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "movo-mail"
-database_id = "REPLACE_ME"
+database_id = "bf3cb228-264e-4bd7-9841-310eb624a98f"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
@@ -27,23 +27,22 @@ bucket_name = "movo-mail"
 
 [[kv_namespaces]]
 binding = "MAIL_KV"
-id = "REPLACE_ME"
+id = "46bc4354092045db94b4431d6b136437"
 
 [assets]
 directory = "web/dist"
 binding = "ASSETS"
 
-# ── Staging ──────────────────────────────────────────────────────────────────
 [env.staging]
-name = "movo-mail-staging"
+# staging uses its own isolated D1 / R2 / KV
 
 [env.staging.vars]
-CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
 
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "movo-mail-staging"
-database_id = "REPLACE_ME"
+database_id = "ab9adc06-bbfc-4e8f-9dba-8e93636f8504"
 migrations_dir = "migrations"
 
 [[env.staging.r2_buckets]]
@@ -52,23 +51,20 @@ bucket_name = "movo-mail-staging"
 
 [[env.staging.kv_namespaces]]
 binding = "MAIL_KV"
-id = "REPLACE_ME"
+id = "0623a8bc765a46c2a9741d56d91b8aea"
 
 [env.staging.assets]
 directory = "web/dist"
 binding = "ASSETS"
 
-# ── Production ───────────────────────────────────────────────────────────────
 [env.production]
-name = "movo-mail-production"
-
 [env.production.vars]
-CF_EMAIL_ENDPOINT = "https://cf-email.zhenhe-co.workers.dev"
+CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
 
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "movo-mail-production"
-database_id = "REPLACE_ME"
+database_id = "ee04b8bf-6ac2-4aa8-8390-86edcd854195"
 migrations_dir = "migrations"
 
 [[env.production.r2_buckets]]
@@ -77,7 +73,7 @@ bucket_name = "movo-mail-production"
 
 [[env.production.kv_namespaces]]
 binding = "MAIL_KV"
-id = "REPLACE_ME"
+id = "a804a1b4770644a8b1715b5352f85739"
 
 [env.production.assets]
 directory = "web/dist"
