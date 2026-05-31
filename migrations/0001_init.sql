@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
   mailbox_id    TEXT NOT NULL,             -- -> mailboxes.id (denormalized for queries)
   message_id    TEXT,                      -- RFC 5322 Message-ID header
   in_reply_to   TEXT,                      -- In-Reply-To header
-  references    TEXT,                      -- References header (space-joined)
+  "references"  TEXT,                      -- References header (space-joined); quoted: reserved word (D1 rejects bare)
   direction     TEXT NOT NULL,             -- 'inbound' | 'outbound'
   from_address  TEXT NOT NULL,
   from_name     TEXT,
