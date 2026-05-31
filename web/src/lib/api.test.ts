@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   buildQuery,
+  createAdminMailbox,
   fetchMailboxes,
+  fetchMe,
   fetchThreads,
   friendlyStatusMessage,
   searchMessages,
@@ -218,5 +220,124 @@ describe("api client fetch", () => {
         text: "t",
       }),
     ).rejects.toMatchObject({ status: 0 });
+  });
+});
+
+// ── identity probe (fetchMe) ─────────────────────────────────────────────────
+describe("fetchMe", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("reads the server's FLAT { email, isAdmin } body (admin)", async () => {
+    // Mirror the real server shape from src/api/me.ts: a flat object, NOT { me }.
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ email: "boss@movo.com.my", isAdmin: true }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const me = await fetchMe();
+    expect(me.email).toBe("boss@movo.com.my");
+    expect(me.isAdmin).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith("/api/me", expect.anything());
+  });
+
+  it("reports isAdmin: false for a non-admin", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ email: "alice@movo.com.my", isAdmin: false }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+
+    const me = await fetchMe();
+    expect(me.email).toBe("alice@movo.com.my");
+    expect(me.isAdmin).toBe(false);
+  });
+
+  it("throws ApiError on a server error", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "Unable to load your account." }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+    await expect(fetchMe()).rejects.toBeInstanceOf(ApiError);
+    await expect(fetchMe()).rejects.toMatchObject({ status: 500 });
+  });
+});
+
+// ── admin mailbox creation ───────────────────────────────────────────────────
+describe("createAdminMailbox", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs the body as JSON to /api/admin/mailboxes and returns the mailbox", async () => {
+    const created = {
+      id: "mb-9",
+      address: "sales@movo.com.my",
+      displayName: "Sales",
+      ownerEmail: "owner@movo.com.my",
+    };
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ mailbox: created }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createAdminMailbox({
+      address: "sales@movo.com.my",
+      ownerEmail: "owner@movo.com.my",
+      displayName: "Sales",
+    });
+
+    expect(result).toEqual(created);
+    // Correct path.
+    const call = fetchMock.mock.calls[0] as unknown as
+      | [string, RequestInit]
+      | undefined;
+    expect(call).toBeDefined();
+    const path = call?.[0];
+    const init = call?.[1];
+    expect(path).toBe("/api/admin/mailboxes");
+    // Correct method + JSON body.
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      address: "sales@movo.com.my",
+      ownerEmail: "owner@movo.com.my",
+      displayName: "Sales",
+    });
+    // JSON content-type is set when a body is present.
+    expect(init?.headers).toMatchObject({
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("surfaces a 409 duplicate as an ApiError carrying the server message", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "Address already exists." }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    const promise = createAdminMailbox({
+      address: "dup@movo.com.my",
+      ownerEmail: "owner@movo.com.my",
+    });
+    await expect(promise).rejects.toBeInstanceOf(ApiError);
+    await expect(promise).rejects.toMatchObject({ status: 409 });
+    // The server's reason is appended to the friendly message.
+    await expect(promise).rejects.toThrow(/already exists/i);
   });
 });

@@ -115,6 +115,53 @@ async function request<T>(
   }
 }
 
+/**
+ * Like `request` but for endpoints whose success carries no JSON body (e.g. a
+ * DELETE returning 204 or an empty 200). Shares the exact same error mapping —
+ * only the success path differs (no parse).
+ */
+async function requestNoContent(
+  path: string,
+  init?: RequestInit,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...init?.headers,
+      },
+    });
+  } catch {
+    throw new ApiError(
+      "Network error — check your connection and try again.",
+      0,
+    );
+  }
+
+  if (!response.ok) {
+    let serverMessage: string | null = null;
+    if (response.status < 500) {
+      try {
+        const data = (await response.json()) as { error?: unknown };
+        if (typeof data.error === "string") {
+          serverMessage = data.error;
+        }
+      } catch {
+        serverMessage = null;
+      }
+    }
+    throw new ApiError(
+      serverMessage
+        ? `${friendlyStatusMessage(response.status)} (${serverMessage})`
+        : friendlyStatusMessage(response.status),
+      response.status,
+    );
+  }
+}
+
 /** A mailbox the caller owns, as returned by GET /api/mailboxes. */
 export interface MailboxSummary {
   id: string;
@@ -176,4 +223,72 @@ export async function aiDraft(body: AiDraftRequest): Promise<AiDraftResult> {
     body: JSON.stringify(body),
   });
   return data.draft;
+}
+
+// ── Admin: self-service mailbox management ───────────────────────────────────
+
+/** The caller's identity + whether they hold the admin role. */
+export interface Me {
+  email: string;
+  isAdmin: boolean;
+}
+
+/**
+ * GET /api/me — the signed-in identity plus the admin flag the UI uses to gate
+ * the Settings panel. Non-admins simply receive `isAdmin: false`.
+ *
+ * The server returns a FLAT `{ email, isAdmin }` object (see src/api/me.ts), so
+ * we read it directly — wrapping it in a `.me` envelope would resolve to
+ * undefined and silently disable the admin UI for real admins.
+ */
+export async function fetchMe(): Promise<Me> {
+  return await request<Me>(`/me`);
+}
+
+/** A mailbox row in the admin table (all mailboxes, not scoped to the caller). */
+export interface AdminMailbox {
+  id: string;
+  address: string;
+  displayName: string | null;
+  ownerEmail: string | null;
+}
+
+/** Body for creating a mailbox from the admin panel. */
+export interface CreateAdminMailboxBody {
+  address: string;
+  ownerEmail: string;
+  displayName?: string;
+}
+
+/** GET /api/admin/mailboxes — every managed mailbox (admin only). */
+export async function fetchAdminMailboxes(): Promise<AdminMailbox[]> {
+  const data = await request<{ mailboxes: AdminMailbox[] }>(`/admin/mailboxes`);
+  return data.mailboxes;
+}
+
+/**
+ * POST /api/admin/mailboxes — create a managed mailbox (a pure D1 write; the
+ * catch-all already routes every address to the worker). Surfaces server 4xx
+ * messages (e.g. 409 duplicate, 400 bad address) via ApiError.
+ */
+export async function createAdminMailbox(
+  body: CreateAdminMailboxBody,
+): Promise<AdminMailbox> {
+  const data = await request<{ mailbox: AdminMailbox }>(`/admin/mailboxes`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data.mailbox;
+}
+
+/**
+ * DELETE /api/admin/mailboxes/:id — remove a managed mailbox (admin only).
+ *
+ * Uses the raw, non-JSON request helper so a 204/empty 200 succeeds (a delete
+ * carries no payload the UI needs); error mapping still goes through ApiError.
+ */
+export async function deleteAdminMailbox(id: string): Promise<void> {
+  await requestNoContent(`/admin/mailboxes/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }

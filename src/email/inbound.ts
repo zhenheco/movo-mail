@@ -85,7 +85,10 @@ export async function handleInbound(
 ): Promise<void> {
   const recipient = message.to;
   try {
-    // Resolve the destination mailbox first; ignore mail to unknown addresses.
+    // Resolve the destination mailbox first. Since the email() split only routes
+    // MANAGED addresses here (non-managed mail is forwarded upstream), this
+    // unknown-mailbox skip is now defensive only — e.g. a mailbox deleted in the
+    // window between classification and processing.
     const mailbox = await getMailboxByAddress(env, recipient);
     if (!mailbox) {
       console.warn(`[inbound] no mailbox for recipient: ${recipient}`);

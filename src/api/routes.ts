@@ -26,6 +26,12 @@ import { messageRoutes } from "./message";
 import { searchRoutes } from "./search";
 import { sendRoutes } from "./send";
 import { aiRoutes } from "./ai";
+import { meRoutes } from "./me";
+import { adminRoutes } from "./admin";
+
+// Re-exported so the integrate step / tests can mount or exercise the identity
+// and admin surfaces independently of the read/send/AI surfaces.
+export { meRoutes, adminRoutes };
 
 /**
  * Build the read-route sub-router (threads + message + search). Exported so the
@@ -52,5 +58,7 @@ export function apiRoutes(): Hono<AccessEnv> {
   app.route("/", readRoutes());
   app.route("/", sendRoutes());
   app.route("/", aiRoutes());
+  app.route("/", meRoutes());
+  app.route("/", adminRoutes());
   return app;
 }

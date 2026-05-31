@@ -53,6 +53,7 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
     CF_ACCESS_AUD: AUD,
     CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
     AI_API_KEY: "test-ai-key",
+    FALLBACK_FORWARD: "fallback@movo.com.my",
     ...overrides,
   };
 }

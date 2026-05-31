@@ -81,6 +81,7 @@ function makeEnv(bucket: R2Bucket): Env {
     CF_ACCESS_AUD: "aud",
     CF_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
     AI_API_KEY: "ai-key",
+    FALLBACK_FORWARD: "fallback@movo.com.my",
   };
 }
 

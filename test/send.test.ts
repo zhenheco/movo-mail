@@ -127,6 +127,7 @@ function makeEnv(kv?: KVNamespace): Env {
     CF_ACCESS_AUD: "aud",
     CF_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
     AI_API_KEY: "ai_test_key",
+    FALLBACK_FORWARD: "fallback@movo.com.my",
   };
 }
 

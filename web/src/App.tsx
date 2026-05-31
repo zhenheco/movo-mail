@@ -19,11 +19,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageWithAttachments, Thread } from "./lib/types";
 import { resolveFromAddress, resolveMailboxId } from "./lib/mailbox";
-import { ApiError, fetchMailboxes } from "./lib/api";
+import { ApiError, fetchMailboxes, fetchMe } from "./lib/api";
 import { blankDraft, replyDraft, type ComposeDraft } from "./lib/compose";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { Compose } from "./components/Compose";
+import { AdminPanel } from "./components/AdminPanel";
 import { EmptyState } from "./components/ui/feedback";
 
 /** Resolved active mailbox: its id (for scoping) + From address (for sends). */
@@ -118,6 +119,29 @@ export default function App() {
   const [compose, setCompose] = useState<ComposeDraft | null>(null);
   // Bump to force the inbox to re-fetch after a send.
   const [inboxNonce, setInboxNonce] = useState(0);
+  // Admin gating + settings panel visibility (independent of mailbox state).
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    // A failed identity probe simply leaves the admin UI hidden — never blocks
+    // the inbox.
+    fetchMe()
+      .then((me) => {
+        if (!cancelled) {
+          setIsAdmin(me.isAdmin);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsAdmin(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (mailboxState.status === "loading") {
     return (
@@ -145,6 +169,12 @@ export default function App() {
 
   const mailboxId = mailboxState.mailbox.id;
   const fromAddress = mailboxState.mailbox.address;
+
+  // Admin settings panel replaces the main pane while open. Guarded by isAdmin
+  // so a stale flag (or a non-admin) can never reach it.
+  if (isAdmin && showSettings) {
+    return <AdminPanel onClose={() => setShowSettings(false)} />;
+  }
 
   function handleSelectThread(thread: Thread) {
     setSelectedThreadId(thread.id);
@@ -181,6 +211,7 @@ export default function App() {
         onSelectThread={handleSelectThread}
         onSelectSearchHit={handleSelectSearchHit}
         onCompose={handleCompose}
+        onOpenSettings={isAdmin ? () => setShowSettings(true) : undefined}
       />
 
       <main aria-label="Conversation" className="flex flex-1 flex-col overflow-hidden">

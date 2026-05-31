@@ -20,9 +20,31 @@ import type {
   SendLogRow,
   AuditRow,
   Mailbox,
+  AdminMailbox,
+  User,
+  UserRole,
   ParsedInbound,
   SendStatus,
 } from "../types";
+
+/**
+ * Thrown by createMailbox when the address is already taken. A typed error lets
+ * the API layer map it to a 409 Conflict instead of a generic 500.
+ */
+export class MailboxExistsError extends Error {
+  constructor(public readonly address: string) {
+    super(`mailbox already exists: ${address}`);
+    this.name = "MailboxExistsError";
+  }
+}
+
+/** Fields required to create a mailbox from the admin UI. */
+export interface CreateMailboxInput {
+  address: string;
+  /** Owner's email; upserted to a user row. null = unowned mailbox. */
+  ownerEmail: string | null;
+  displayName: string | null;
+}
 
 /** A message together with its attachments (for the thread/message views). */
 export interface MessageWithAttachments extends Message {
@@ -97,6 +119,21 @@ export interface AuditInput {
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Canonical email-address normalization — the SINGLE place addresses are folded
+ * to their stored form. Email local-parts/domains are matched case-insensitively
+ * (Cloudflare delivers `message.to` with the sender's original casing), so every
+ * write AND read path runs the address through here. Keeping it in one function
+ * guarantees the lookup form can never drift from the stored form: a mailbox
+ * created as `Sales@movo.com.my` is stored — and looked up — as
+ * `sales@movo.com.my`, so inbound mail addressed in any casing still matches and
+ * is stored (never mis-forwarded to the fallback), and two rows differing only by
+ * case can never both exist.
+ */
+export function normalizeAddress(addr: string): string {
+  return addr.trim().toLowerCase();
+}
+
 /** Booleans are stored as SQLite 0/1 integers. */
 const bool = (b: boolean): number => (b ? 1 : 0);
 
@@ -113,6 +150,11 @@ async function guard<T>(op: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (cause) {
+    // Typed domain errors carry their own meaning (e.g. a 409 mapping) and must
+    // reach the caller intact rather than being flattened into a generic 500.
+    if (cause instanceof MailboxExistsError) {
+      throw cause;
+    }
     const detail = cause instanceof Error ? cause.message : String(cause);
     throw new Error(`Database operation failed (${op}): ${detail}`, { cause });
   }
@@ -252,7 +294,14 @@ export async function searchMessages(
   });
 }
 
-/** Resolve a mailbox by its email address. */
+/**
+ * Resolve a mailbox by its email address (case-insensitive).
+ *
+ * The bound parameter is run through normalizeAddress so the lookup mirrors the
+ * write path (createMailbox stores the normalized address). Without this an
+ * inbound message addressed `Sales@movo.com.my` would not match a mailbox stored
+ * as `sales@movo.com.my` and would be mis-classified as non-managed.
+ */
 export async function getMailboxByAddress(
   env: Env,
   addr: string,
@@ -263,7 +312,7 @@ export async function getMailboxByAddress(
          FROM mailboxes
         WHERE address = ?`,
     )
-      .bind(addr)
+      .bind(normalizeAddress(addr))
       .first<Mailbox>();
     return row ? { ...row } : null;
   });
@@ -294,6 +343,66 @@ export async function getMailboxesForUser(
       .all<Mailbox>();
     return (results ?? []).map((r) => ({ ...r }));
   });
+}
+
+/** Resolve a user (incl. role) by their Access identity email. */
+export async function getUserByEmail(
+  env: Env,
+  email: string,
+): Promise<User | null> {
+  return guard("getUserByEmail", async () => {
+    const row = await env.DB.prepare(
+      `SELECT id, email, name, role, created_at, updated_at
+         FROM users
+        WHERE email = ?`,
+    )
+      .bind(email)
+      .first<User>();
+    return row ? { ...row } : null;
+  });
+}
+
+/** Read just the authorization role for a user, or null when unknown. */
+export async function getUserRole(
+  env: Env,
+  email: string,
+): Promise<UserRole | null> {
+  return guard("getUserRole", async () => {
+    const row = await env.DB.prepare(
+      `SELECT role FROM users WHERE email = ?`,
+    )
+      .bind(email)
+      .first<{ role: UserRole }>();
+    return row?.role ?? null;
+  });
+}
+
+/**
+ * List every mailbox for the admin management view, with the owner resolved to
+ * their email via a LEFT JOIN (an unowned/orphaned mailbox still lists with a
+ * null ownerEmail). Ordered by address for a stable UI.
+ */
+export async function listAllMailboxes(env: Env): Promise<AdminMailbox[]> {
+  return guard("listAllMailboxes", async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT m.id          AS id,
+              m.address      AS address,
+              m.display_name AS displayName,
+              u.email        AS ownerEmail
+         FROM mailboxes m
+         LEFT JOIN users u ON u.id = m.owner_id
+        ORDER BY m.address ASC`,
+    ).all<AdminMailbox>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
+/** Whether an address belongs to a managed mailbox (used by inbound split). */
+export async function isManagedAddress(
+  env: Env,
+  addr: string,
+): Promise<boolean> {
+  return (await getMailboxByAddress(env, addr)) !== null;
 }
 
 /** Read a send-log row by its local id (for status polling). */
@@ -333,6 +442,42 @@ export async function getAuditLog(env: Env, limit = 100): Promise<AuditRow[]> {
 // ─────────────────────────────────────────────────────────────────────────────
 // Writes
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find-or-create a user by email. Returns the user id.
+ *
+ * On first sight the user is inserted with role 'user'. A subsequent upsert
+ * (e.g. on next login) updates only the display name and never downgrades an
+ * existing admin — the role column is left untouched on the update path. The
+ * INSERT ... ON CONFLICT keeps this race-safe under the users.email UNIQUE.
+ */
+export async function upsertUserByEmail(
+  env: Env,
+  email: string,
+  name: string | null,
+): Promise<string> {
+  return guard("upsertUserByEmail", async () => {
+    const id = uuid();
+    const now = Date.now();
+    // Insert when new; on email conflict only refresh name/updated_at. role is
+    // deliberately excluded from the UPDATE so a granted admin stays admin.
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, name, role, created_at, updated_at)
+       VALUES (?, ?, ?, 'user', ?, ?)
+       ON CONFLICT(email) DO UPDATE SET
+         name = COALESCE(excluded.name, users.name),
+         updated_at = excluded.updated_at`,
+    )
+      .bind(id, email, name, now, now)
+      .run();
+
+    // The generated id is only used if WE inserted; otherwise read the real id.
+    const row = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`)
+      .bind(email)
+      .first<{ id: string }>();
+    return row?.id ?? id;
+  });
+}
 
 /** Find-or-create the thread for a message. Returns the thread id. */
 export async function upsertThread(
@@ -647,6 +792,70 @@ export async function insertAudit(
       )
       .run();
     return id;
+  });
+}
+
+/**
+ * Create a mailbox from the admin UI (a PURE D1 write — no CF API call, since
+ * the catch-all already routes every address to this Worker). Upserts the owner
+ * user (when an ownerEmail is given) so mailboxes.owner_id always points at a
+ * real users row, then inserts the mailbox. Returns the new mailbox id.
+ *
+ * Throws MailboxExistsError when the address is already taken (the
+ * mailboxes.address UNIQUE constraint), so the caller can return a 409.
+ */
+export async function createMailbox(
+  env: Env,
+  input: CreateMailboxInput,
+): Promise<{ id: string }> {
+  return guard("createMailbox", async () => {
+    // Normalize to the canonical stored form FIRST so the duplicate check, the
+    // INSERT, and every later lookup all agree on casing. This is what makes the
+    // existence check below case-insensitive (e.g. `Sales@` collides with an
+    // existing `sales@`) and closes the case-variant duplicate-row hijack.
+    const address = normalizeAddress(input.address);
+    const existing = await getMailboxByAddress(env, address);
+    if (existing) {
+      throw new MailboxExistsError(address);
+    }
+
+    const ownerId = input.ownerEmail
+      ? await upsertUserByEmail(env, input.ownerEmail, null)
+      : null;
+
+    const id = uuid();
+    const now = Date.now();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO mailboxes
+           (id, address, display_name, owner_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(id, address, input.displayName, ownerId, now, now)
+        .run();
+    } catch (cause) {
+      // Lost a race on the UNIQUE(address) between the check above and insert.
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      if (/unique/i.test(detail)) {
+        throw new MailboxExistsError(address);
+      }
+      throw cause;
+    }
+    return { id };
+  });
+}
+
+/**
+ * Delete a mailbox row by id. Its threads, messages and attachments cascade
+ * away via the ON DELETE CASCADE FKs. Returns false when no row matched (so the
+ * caller can return a 404 instead of a misleading success).
+ */
+export async function deleteMailbox(env: Env, id: string): Promise<boolean> {
+  return guard("deleteMailbox", async () => {
+    const res = await env.DB.prepare(`DELETE FROM mailboxes WHERE id = ?`)
+      .bind(id)
+      .run();
+    return (res.meta?.changes ?? 0) > 0;
   });
 }
 

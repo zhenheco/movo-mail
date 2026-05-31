@@ -33,6 +33,15 @@ export interface Env {
   CF_ACCESS_TEAM_DOMAIN: string;
   /** LLM provider API key used by src/lib/ai.ts. */
   AI_API_KEY: string;
+  /**
+   * Fallback recipient for inbound mail addressed to a NON-managed mailbox.
+   *
+   * The CF Email Routing catch-all points at this Worker's email() handler, so
+   * every address arrives here. When the recipient is not a managed mailbox in
+   * D1, the message is forwarded to this address — preserving the prior
+   * catch-all behavior. A non-managed message must NEVER be dropped.
+   */
+  FALLBACK_FORWARD: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,10 +79,15 @@ export interface AccessUser {
 // Domain row types (mirror migrations/0001_init.sql)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Coarse authorization role (mirrors users.role; see 0002_user_role.sql). */
+export type UserRole = "admin" | "user";
+
 export interface User {
   id: string;
   email: string;
   name: string | null;
+  /** 'admin' may manage mailboxes from the UI; 'user' is the default. */
+  role: UserRole;
   created_at: EpochMs;
   updated_at: EpochMs;
 }
@@ -85,6 +99,19 @@ export interface Mailbox {
   owner_id: string | null;
   created_at: EpochMs;
   updated_at: EpochMs;
+}
+
+/**
+ * A mailbox row enriched for the admin management view: the owner is resolved
+ * to their email (via a LEFT JOIN, so an unowned/orphaned mailbox still lists
+ * with `ownerEmail: null`). camelCase because this is an API/UI-facing shape,
+ * not a raw DB row.
+ */
+export interface AdminMailbox {
+  id: string;
+  address: string;
+  displayName: string | null;
+  ownerEmail: string | null;
 }
 
 export interface Thread {

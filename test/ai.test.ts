@@ -116,6 +116,7 @@ function makeEnv(kv: KVNamespace): AccessEnv["Bindings"] {
   return {
     MAIL_KV: kv,
     AI_API_KEY: "test-ai-key",
+    FALLBACK_FORWARD: "test-fallback@movo.com.my",
     DB: {} as unknown as D1Database,
     MAIL_R2: {} as unknown as R2Bucket,
     ASSETS: {} as unknown as Fetcher,
