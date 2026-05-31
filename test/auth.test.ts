@@ -14,14 +14,14 @@ import { accessAuth, ACCESS_JWT_HEADER } from "../src/middleware/access";
 import type { AccessEnv } from "../src/middleware/access";
 import type { Env, Mailbox } from "../src/types";
 
-// Mock the data layer so the middleware's `getMailboxByAddress` import resolves
+// Mock the data layer so the middleware's `getMailboxesForUser` import resolves
 // to a controllable stub. A static named import binds directly to the module
 // export, so we mock the module rather than spy on a namespace object.
 vi.mock("../src/db", () => ({
-  getMailboxByAddress: vi.fn(),
+  getMailboxesForUser: vi.fn(),
 }));
-import { getMailboxByAddress } from "../src/db";
-const getMailboxByAddressMock = vi.mocked(getMailboxByAddress);
+import { getMailboxesForUser } from "../src/db";
+const getMailboxesForUserMock = vi.mocked(getMailboxesForUser);
 
 /**
  * Cloudflare Access JWT verification tests.
@@ -133,12 +133,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // Default: a provisioned mailbox exists. Cases that need otherwise override.
-  getMailboxByAddressMock.mockResolvedValue(mailbox("alice@movo.com.my"));
+  // Default: the user owns a mailbox. Cases that need otherwise override.
+  getMailboxesForUserMock.mockResolvedValue([mailbox("alice@movo.com.my")]);
 });
 
 afterEach(() => {
-  getMailboxByAddressMock.mockReset();
+  getMailboxesForUserMock.mockReset();
 });
 
 describe("accessAuth", () => {
@@ -153,7 +153,7 @@ describe("accessAuth", () => {
     expect(body.ok).toBe(true);
     expect(body.user.email).toBe("alice@movo.com.my");
     expect(body.user.sub).toBe("sub-alice");
-    expect(getMailboxByAddressMock).toHaveBeenCalledWith(
+    expect(getMailboxesForUserMock).toHaveBeenCalledWith(
       expect.anything(),
       "alice@movo.com.my",
     );
@@ -189,8 +189,8 @@ describe("accessAuth", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 when the verified email has no mailbox", async () => {
-    getMailboxByAddressMock.mockResolvedValue(null);
+  it("returns 403 when the verified email owns no mailbox", async () => {
+    getMailboxesForUserMock.mockResolvedValue([]);
     const token = await signToken({ email: "stranger@movo.com.my" });
     const res = await call(token, makeEnv());
     expect(res.status).toBe(403);

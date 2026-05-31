@@ -16,7 +16,7 @@ import {
   type JWTVerifyGetKey,
 } from "jose";
 import type { Env, AccessUser } from "../types";
-import { getMailboxByAddress } from "../db";
+import { getMailboxesForUser } from "../db";
 
 /** Hono variable map populated by this middleware. */
 export interface AccessVariables {
@@ -125,13 +125,20 @@ export function accessAuth(
       return c.json({ error: "Invalid or expired session." }, 401);
     }
 
-    let mailbox;
+    // Authorize on mailbox OWNERSHIP, not on the login email being a mailbox
+    // address. A user signs in with their personal identity (e.g. a Gmail
+    // address) and is granted access if they own at least one mailbox
+    // (mailboxes.owner_id -> users.id). Matching the login email against a
+    // mailbox ADDRESS would wrongly reject every legitimate user whose identity
+    // differs from the mailbox name.
+    let ownsMailbox: boolean;
     try {
-      mailbox = await getMailboxByAddress(c.env, email);
+      const mailboxes = await getMailboxesForUser(c.env, email);
+      ownsMailbox = mailboxes.length > 0;
     } catch {
       return c.json({ error: "Unable to verify your account." }, 401);
     }
-    if (!mailbox) {
+    if (!ownsMailbox) {
       return c.json(
         { error: "No mailbox is provisioned for this account." },
         403,
