@@ -120,6 +120,13 @@ export interface Thread {
   subject: string | null;
   snippet: string | null;
   last_message_at: EpochMs;
+  /**
+   * Id of this thread's latest message (greatest date) — the message the UI
+   * opens when the thread row is selected. A thread id is NOT a message id, so
+   * this is the only correct value to pass to GET /message/:id. Null only for a
+   * thread that has no messages yet.
+   */
+  last_message_id: string | null;
   message_count: number;
   /** 0/1 boolean as stored in SQLite. */
   unread: number;

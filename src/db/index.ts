@@ -176,12 +176,21 @@ export async function getThreads(
   mailboxId: string,
 ): Promise<Thread[]> {
   return guard("getThreads", async () => {
+    // A thread id and a message id are distinct uuids, so the UI cannot open a
+    // thread by its own id. The correlated subquery resolves each thread's
+    // latest message (greatest date; tie-broken by rowid) and exposes its id as
+    // `last_message_id`, giving the reading pane a real message id to load.
+    // It is null only for an (empty) thread with no messages.
     const { results } = await env.DB.prepare(
-      `SELECT id, mailbox_id, subject, snippet, last_message_at, message_count,
-              unread, created_at, updated_at
-         FROM threads
-        WHERE mailbox_id = ?
-        ORDER BY last_message_at DESC`,
+      `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
+              t.message_count, t.unread, t.created_at, t.updated_at,
+              (SELECT m.id FROM messages m
+                 WHERE m.thread_id = t.id
+                 ORDER BY m.date DESC, m.rowid DESC
+                 LIMIT 1) AS last_message_id
+         FROM threads t
+        WHERE t.mailbox_id = ?
+        ORDER BY t.last_message_at DESC`,
     )
       .bind(mailboxId)
       .all<Thread>();
@@ -196,10 +205,14 @@ export async function getThread(
 ): Promise<ThreadWithMessages | null> {
   return guard("getThread", async () => {
     const thread = await env.DB.prepare(
-      `SELECT id, mailbox_id, subject, snippet, last_message_at, message_count,
-              unread, created_at, updated_at
-         FROM threads
-        WHERE id = ?`,
+      `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
+              t.message_count, t.unread, t.created_at, t.updated_at,
+              (SELECT m.id FROM messages m
+                 WHERE m.thread_id = t.id
+                 ORDER BY m.date DESC, m.rowid DESC
+                 LIMIT 1) AS last_message_id
+         FROM threads t
+        WHERE t.id = ?`,
     )
       .bind(id)
       .first<Thread>();

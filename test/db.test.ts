@@ -312,6 +312,49 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(await getThreads(env, "mb-1")).toHaveLength(2);
     });
 
+    it("carries the latest message id per thread as last_message_id", async () => {
+      // A thread groups two messages of different dates; last_message_id must be
+      // the NEWEST message's id (not the thread id, not the oldest message).
+      const firstId = await insertInboundMessage(env, makeInbound());
+      const newestId = await insertInboundMessage(
+        env,
+        makeInbound({
+          messageId: "<msg-2@example.com>",
+          inReplyTo: "<msg-1@example.com>",
+          references: ["<msg-1@example.com>"],
+          subject: "Re: Order question",
+          text: "Following up",
+          snippet: "Following up",
+          date: 1_700_000_100_000,
+        }),
+      );
+
+      const threads = await getThreads(env, "mb-1");
+      expect(threads).toHaveLength(1);
+      expect(threads[0]?.last_message_id).toBe(newestId);
+      expect(threads[0]?.last_message_id).not.toBe(firstId);
+      // The bug under repair: the thread id is NOT a message id.
+      expect(threads[0]?.last_message_id).not.toBe(threads[0]?.id);
+    });
+
+    it("yields last_message_id === null for a thread with no messages", async () => {
+      // An empty thread (created directly, no messages) must report null so the
+      // UI shows the empty reader instead of opening a phantom message id.
+      const tid = await upsertThread(env, {
+        mailboxId: "mb-1",
+        subject: "Empty",
+        snippet: "s",
+        lastMessageAt: 1_700_000_000_000,
+        unread: false,
+      });
+      // upsertThread bumps message_count to 1 but inserts no messages row, so
+      // the correlated subquery has nothing to resolve.
+      const threads = await getThreads(env, "mb-1");
+      const empty = threads.find((t) => t.id === tid);
+      expect(empty).toBeDefined();
+      expect(empty?.last_message_id).toBeNull();
+    });
+
     it("orders threads by newest activity first", async () => {
       await insertInboundMessage(
         env,

@@ -26,6 +26,12 @@ export interface Thread {
   subject: string | null;
   snippet: string | null;
   last_message_at: EpochMs;
+  /**
+   * Id of this thread's latest message — the id ThreadView loads when the row is
+   * opened. A thread id is a different uuid from any message id, so this (not
+   * `id`) is what GET /api/message/:id must receive. Null for an empty thread.
+   */
+  last_message_id: string | null;
   message_count: number;
   /** 0/1 boolean as stored in SQLite. */
   unread: number;

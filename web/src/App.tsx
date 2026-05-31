@@ -20,6 +20,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageWithAttachments, Thread } from "./lib/types";
 import { resolveFromAddress, resolveMailboxId } from "./lib/mailbox";
 import { ApiError, fetchMailboxes, fetchMe } from "./lib/api";
+import { selectionForThread } from "./lib/selection";
 import { blankDraft, replyDraft, type ComposeDraft } from "./lib/compose";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
@@ -177,10 +178,13 @@ export default function App() {
   }
 
   function handleSelectThread(thread: Thread) {
-    setSelectedThreadId(thread.id);
-    // The read surface keys messages by id; a thread row resolves to its id as
-    // the representative message to load (ThreadView handles a 404 gracefully).
-    setOpenMessageId(thread.id);
+    // A thread id and a message id are distinct uuids, so the reader (keyed by
+    // a message id) must open the thread's LATEST message, not the thread id.
+    // selectionForThread maps to last_message_id; a null id (empty thread) lets
+    // ThreadView show its empty state instead of 404-ing on a thread id.
+    const { selectedThreadId, openMessageId } = selectionForThread(thread);
+    setSelectedThreadId(selectedThreadId);
+    setOpenMessageId(openMessageId);
   }
 
   function handleSelectSearchHit(message: Message) {

@@ -56,6 +56,7 @@ function makeThread(over: Partial<Thread> = {}): Thread {
     subject: "Hi",
     snippet: "hello",
     last_message_at: 100,
+    last_message_id: "msg-1",
     message_count: 1,
     unread: 0,
     created_at: 1,
@@ -140,6 +141,8 @@ describe("GET /threads", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { threads: Thread[] };
     expect(body.threads).toHaveLength(1);
+    // The UI opens last_message_id, so the route must pass it through verbatim.
+    expect(body.threads[0]?.last_message_id).toBe("msg-1");
     expect(mGetThreads).toHaveBeenCalledWith(expect.anything(), "mb-alice");
   });
 
