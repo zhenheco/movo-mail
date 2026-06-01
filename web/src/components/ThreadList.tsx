@@ -22,6 +22,8 @@ export interface ThreadListProps {
   /** Selecting a search hit jumps straight to that message's thread. */
   onSelectSearchHit: (message: Message) => void;
   onCompose: () => void;
+  /** Click the "Movo Mail" wordmark to return to a clean inbox. */
+  onHome: () => void;
   /** Admin-only: open the mailbox settings panel. Omitted for non-admins. */
   onOpenSettings?: () => void;
 }
@@ -32,6 +34,7 @@ export function ThreadList({
   onSelectThread,
   onSelectSearchHit,
   onCompose,
+  onHome,
   onOpenSettings,
 }: ThreadListProps) {
   const [searchTerm, setSearchTerm] = useState("");
@@ -67,7 +70,15 @@ export function ThreadList({
       className="flex w-80 shrink-0 flex-col border-r border-border"
     >
       <header className="flex h-14 items-center justify-between gap-2 px-4">
-        <span className="font-semibold">Movo Mail</span>
+        <button
+          type="button"
+          onClick={onHome}
+          className="cursor-pointer rounded font-semibold transition-colors hover:text-primary"
+          aria-label="Movo Mail — back to inbox"
+          title="Back to inbox"
+        >
+          Movo Mail
+        </button>
         <div className="flex items-center gap-1">
           {onOpenSettings ? (
             <Button

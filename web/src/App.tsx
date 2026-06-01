@@ -205,6 +205,13 @@ export default function App() {
     setInboxNonce((n) => n + 1);
   }
 
+  /** Return to a clean inbox: clear the open conversation + any compose. */
+  function handleHome() {
+    setSelectedThreadId(null);
+    setOpenMessageId(null);
+    setCompose(null);
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       <ThreadList
@@ -215,6 +222,7 @@ export default function App() {
         onSelectThread={handleSelectThread}
         onSelectSearchHit={handleSelectSearchHit}
         onCompose={handleCompose}
+        onHome={handleHome}
         onOpenSettings={isAdmin ? () => setShowSettings(true) : undefined}
       />
 
