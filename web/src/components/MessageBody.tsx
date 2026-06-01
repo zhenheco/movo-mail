@@ -1,7 +1,6 @@
 /**
- * Renders an email body. HTML is sanitized with DOMPurify a SECOND time on the
- * client (defense in depth — the API already sanitizes server-side) before it
- * is injected via dangerouslySetInnerHTML. If there is no HTML, the plain-text
+ * Renders an email body. HTML is sanitized with browser DOMPurify before it is
+ * injected via dangerouslySetInnerHTML. If there is no HTML, the plain-text
  * body is shown in a wrapping <pre> instead.
  */
 

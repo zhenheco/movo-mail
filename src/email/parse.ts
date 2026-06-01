@@ -3,11 +3,12 @@
  *
  * Kept separate from the I/O handler (inbound.ts) so the parsing logic is
  * trivially unit-testable and the handler stays focused on R2/D1 side effects.
+ * Parsed HTML is stored as-is; rendering sanitization happens client-side with
+ * browser DOMPurify in MessageBody.tsx because workerd has no DOM.
  */
 
 import PostalMime from "postal-mime";
 import type { Address as PmAddress, Email } from "postal-mime";
-import DOMPurify from "isomorphic-dompurify";
 import type {
   EmailAddress,
   EpochMs,
@@ -116,10 +117,7 @@ export async function parseInbound(
 
   const from = flattenAddress(email.from)[0] ?? { address: "" };
   const text = email.text ?? null;
-  const sanitizedHtml = email.html
-    ? DOMPurify.sanitize(email.html, { FORBID_TAGS: ["style"] })
-    : null;
-  const html = sanitizedHtml && sanitizedHtml.length > 0 ? sanitizedHtml : null;
+  const html = email.html && email.html.length > 0 ? email.html : null;
 
   return {
     mailboxAddress,

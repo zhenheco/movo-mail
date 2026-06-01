@@ -57,7 +57,7 @@ export interface Message {
   subject: string | null;
   snippet: string | null;
   text_body: string | null;
-  /** Server-sanitized HTML (DOMPurify) — still re-sanitized client-side. */
+  /** Raw parsed HTML body; MessageBody sanitizes it client-side before render. */
   html_body: string | null;
   r2_raw_key: string | null;
   has_attachments: number;

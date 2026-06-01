@@ -186,7 +186,7 @@ export async function fetchThreads(mailboxId: string): Promise<Thread[]> {
   return data.threads;
 }
 
-/** GET /api/message/:id (html_body is sanitized server-side). */
+/** GET /api/message/:id (html_body is sanitized client-side before render). */
 export async function fetchMessage(
   id: string,
 ): Promise<MessageWithAttachments> {

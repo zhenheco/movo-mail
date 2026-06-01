@@ -225,7 +225,7 @@ export interface ParsedInbound {
   bcc: EmailAddress[];
   subject: string | null;
   text: string | null;
-  /** Already-sanitized HTML, or null. */
+  /** Raw parsed HTML body, or null. Sanitized client-side before rendering. */
   html: string | null;
   snippet: string | null;
   /** Header Date as epoch ms; falls back to receive time. */

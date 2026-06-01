@@ -2,7 +2,7 @@
  * Read-route tests for the api module.
  *
  * The db contract is fully mocked: these tests assert *route* behavior —
- * input validation, 404 on missing, HTML sanitization, and (critically) auth
+ * input validation, 404 on missing, HTML pass-through, and (critically) auth
  * scoping so one user can never read another mailbox's data.
  *
  * The middleware that sets `c.get('user')` is not exercised here; instead each
@@ -173,23 +173,20 @@ describe("GET /message/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns the message with sanitized html_body", async () => {
+  it("returns the message with html_body unchanged", async () => {
+    const rawHtml = '<p onclick="evil()">hi</p><script>steal()</script>';
     mGetMessage.mockResolvedValue(
       makeMessage({
-        html_body: '<p onclick="evil()">hi</p><script>steal()</script>',
+        html_body: rawHtml,
       }),
     );
     const res = await dispatch("/message/msg-1");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { message: MessageWithAttachments };
-    const html = body.message.html_body ?? "";
-    expect(html).not.toContain("<script");
-    expect(html).not.toContain("steal()");
-    expect(html).not.toContain("onclick");
-    expect(html).toContain("hi");
+    expect(body.message.html_body).toBe(rawHtml);
   });
 
-  it("falls back to the R2 raw body when html_body is null, sanitizing it", async () => {
+  it("does not treat the R2 raw .eml as html_body when html_body is null", async () => {
     mGetMessage.mockResolvedValue(
       makeMessage({ html_body: null, r2_raw_key: "msg/msg-1.eml" }),
     );
@@ -202,10 +199,8 @@ describe("GET /message/:id", () => {
     const res = await dispatch("/message/msg-1", env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { message: MessageWithAttachments };
-    const html = body.message.html_body ?? "";
-    expect(html).toContain("raw");
-    expect(html).not.toContain("<script");
-    expect(r2Get).toHaveBeenCalledWith("msg/msg-1.eml");
+    expect(body.message.html_body).toBeNull();
+    expect(r2Get).not.toHaveBeenCalled();
   });
 
   it("500 when db throws", async () => {

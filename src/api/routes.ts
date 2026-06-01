@@ -14,7 +14,7 @@
  * src/api/scope.ts; a user can never read another mailbox's data):
  *   GET /mailboxes              → { mailboxes: { id, address, displayName }[] }
  *   GET /threads   ?mailbox=    → { threads: Thread[] }
- *   GET /message/:id            → { message: MessageWithAttachments } (sanitized HTML)
+ *   GET /message/:id            → { message: MessageWithAttachments }
  *   GET /search    ?q=&mailbox= → { results: Message[] }
  */
 
