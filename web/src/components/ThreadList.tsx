@@ -79,23 +79,31 @@ export function ThreadList({
         >
           Movo Mail
         </button>
-        <div className="flex items-center gap-1">
-          {onOpenSettings ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onOpenSettings}
-              aria-label="Mailbox settings"
-              title="Mailbox settings"
-            >
-              <GearIcon />
-            </Button>
-          ) : null}
-          <Button size="sm" onClick={onCompose} aria-label="Compose new email">
-            Compose
+        {onOpenSettings ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onOpenSettings}
+            aria-label="Mailbox settings"
+            title="Mailbox settings"
+          >
+            <GearIcon />
           </Button>
-        </div>
+        ) : null}
       </header>
+
+      {/* Gmail-style raised "Compose" pill above the inbox. */}
+      <div className="px-3 pb-3">
+        <button
+          type="button"
+          onClick={onCompose}
+          aria-label="Compose new email"
+          className="inline-flex cursor-pointer items-center gap-3 rounded-2xl bg-muted px-5 py-3.5 text-sm font-medium text-foreground shadow-md ring-1 ring-border/60 transition-shadow hover:shadow-lg"
+        >
+          <PencilIcon />
+          撰寫
+        </button>
+      </div>
 
       <form
         onSubmit={submitSearch}
@@ -211,6 +219,25 @@ function ThreadRow({
         </span>
       </div>
     </button>
+  );
+}
+
+/** Inline pencil glyph for the Compose pill (no icon dep). */
+function PencilIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5 text-muted-foreground"
+      aria-hidden="true"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
   );
 }
 
