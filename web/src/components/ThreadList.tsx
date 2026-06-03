@@ -77,7 +77,7 @@ export function ThreadList({
           aria-label="Movo Mail — back to inbox"
           title="Back to inbox"
         >
-          Movo Mail
+          <img src="/movo-logo.svg" alt="Movo Mail" className="h-7 w-auto" />
         </button>
         {onOpenSettings ? (
           <Button
