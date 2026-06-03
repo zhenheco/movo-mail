@@ -344,6 +344,38 @@ export async function searchMessages(
 }
 
 /**
+ * Search across EVERY mailbox the user owns (the unified-inbox search). Ownership
+ * is scoped IN SQL — before the LIMIT — so another user's matches can neither
+ * crowd out the caller's own hits nor be materialized into the Worker. Mirrors
+ * searchMessages' match clause + getThreadsForOwner's owner join.
+ */
+export async function searchMessagesForOwner(
+  env: Env,
+  q: string,
+  ownerEmail: string,
+): Promise<Message[]> {
+  return guard("searchMessagesForOwner", async () => {
+    const like = `%${escapeLike(q)}%`;
+    const matchClause = `(subject LIKE ? ESCAPE '\\'
+              OR text_body LIKE ? ESCAPE '\\'
+              OR snippet LIKE ? ESCAPE '\\'
+              OR from_address LIKE ? ESCAPE '\\')`;
+    const { results } = await env.DB.prepare(
+      `SELECT ${MESSAGE_COLS} FROM messages
+        WHERE ${matchClause}
+          AND mailbox_id IN (
+            SELECT mb.id FROM mailboxes mb
+            JOIN users u ON u.id = mb.owner_id
+            WHERE u.email = ?)
+        ORDER BY date DESC LIMIT 100`,
+    )
+      .bind(like, like, like, like, normalizeEmail(ownerEmail))
+      .all<Message>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
+/**
  * Resolve a mailbox by its email address (case-insensitive).
  *
  * The bound parameter is run through normalizeAddress so the lookup mirrors the

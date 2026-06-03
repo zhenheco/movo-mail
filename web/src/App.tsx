@@ -39,6 +39,7 @@ import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { Compose } from "./components/Compose";
 import { AdminPanel } from "./components/AdminPanel";
+import { Button } from "./components/ui/button";
 import { EmptyState } from "./components/ui/feedback";
 
 /** localStorage key remembering the last active mailbox across reloads. */
@@ -85,6 +86,9 @@ export default function App() {
   const [mailboxState, setMailboxState] = useState<MailboxState>({
     status: "loading",
   });
+  // Bump to re-fetch the owned-mailbox list (e.g. after an admin adds the first
+  // mailbox from settings while still in the empty state).
+  const [mailboxNonce, setMailboxNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,7 +121,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [override]);
+  }, [override, mailboxNonce]);
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [openMessageId, setOpenMessageId] = useState<string | null>(null);
@@ -148,6 +152,21 @@ export default function App() {
     };
   }, []);
 
+  // Admin settings / mailbox management must be reachable regardless of mailbox
+  // state — otherwise an admin who owns zero mailboxes is stranded on the empty
+  // state with no way to create the first one. Closing re-fetches the owned list
+  // so a freshly-added mailbox shows up immediately.
+  if (isAdmin && showSettings) {
+    return (
+      <AdminPanel
+        onClose={() => {
+          setShowSettings(false);
+          setMailboxNonce((n) => n + 1);
+        }}
+      />
+    );
+  }
+
   if (mailboxState.status === "loading") {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
@@ -158,8 +177,19 @@ export default function App() {
 
   if (mailboxState.status === "empty") {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background text-foreground">
-        <EmptyState message="No mailbox is provisioned for your account. Contact your administrator." />
+      <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-background text-foreground">
+        <EmptyState
+          message={
+            isAdmin
+              ? "You own no mailboxes yet. Open settings to create one."
+              : "No mailbox is provisioned for your account. Contact your administrator."
+          }
+        />
+        {isAdmin ? (
+          <Button size="sm" onClick={() => setShowSettings(true)}>
+            Manage mailboxes
+          </Button>
+        ) : null}
       </div>
     );
   }
@@ -188,12 +218,6 @@ export default function App() {
       import.meta.env as unknown as Record<string, string | undefined>,
       activeId,
     );
-
-  // Admin settings panel replaces the main pane while open. Guarded by isAdmin
-  // so a stale flag (or a non-admin) can never reach it.
-  if (isAdmin && showSettings) {
-    return <AdminPanel onClose={() => setShowSettings(false)} />;
-  }
 
   function handleSelectThread(thread: Thread) {
     // A thread id and a message id are distinct uuids, so the reader (keyed by

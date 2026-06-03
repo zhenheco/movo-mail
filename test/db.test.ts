@@ -41,6 +41,7 @@ import {
   getMailboxByAddress,
   getMailboxesForUser,
   getThreadsForOwner,
+  searchMessagesForOwner,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
@@ -310,6 +311,45 @@ describe("db (real SQL via node:sqlite)", () => {
 
     it("returns [] for a user that owns no mailboxes (injection-safe)", async () => {
       expect(await getThreadsForOwner(env, "ghost' OR '1'='1")).toHaveLength(0);
+    });
+  });
+
+  describe("searchMessagesForOwner (unified search)", () => {
+    it("returns only matches from the user's owned mailboxes (scoped in SQL)", async () => {
+      await seedUser(env, "u-alice", "alice@gmail.com");
+      await seedUser(env, "u-bob", "bob@gmail.com");
+      await seedMailbox(env, "mb-a1", "sales@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-b1", "ceo@movo.com.my", "u-bob");
+
+      // Same matching term lands in both Alice's and Bob's mailboxes.
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "sales@movo.com.my",
+          messageId: "<a@x>",
+          subject: "Quarterly invoice",
+          text: "invoice attached",
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "ceo@movo.com.my",
+          messageId: "<b@x>",
+          subject: "Quarterly invoice",
+          text: "invoice attached",
+        }),
+      );
+
+      const results = await searchMessagesForOwner(env, "invoice", "alice@gmail.com");
+      expect(results).toHaveLength(1);
+      expect(results[0]?.mailbox_id).toBe("mb-a1");
+    });
+
+    it("returns [] for a user with no owned mailboxes (injection-safe)", async () => {
+      expect(
+        await searchMessagesForOwner(env, "x", "ghost' OR '1'='1"),
+      ).toHaveLength(0);
     });
   });
 

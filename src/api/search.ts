@@ -6,15 +6,15 @@
  * Auth scoping rules:
  *   - if `mailbox` is supplied, the user must own it (else 403) and results are
  *     scoped to that mailbox at the db layer;
- *   - if `mailbox` is omitted, results are filtered to the user's owned
- *     mailboxes after the search so cross-mailbox data never leaks.
+ *   - if `mailbox` is omitted, results are scoped to the user's owned mailboxes
+ *     IN SQL (before the LIMIT), so another user's matches can neither crowd out
+ *     the caller's hits nor be materialized into the Worker.
  */
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import type { Message } from "../types";
-import { searchMessages } from "../db";
-import { getOwnedMailboxIds, userOwnsMailbox } from "./scope";
+import { searchMessages, searchMessagesForOwner } from "../db";
+import { userOwnsMailbox } from "./scope";
 
 /** Build the /search sub-router. */
 export function searchRoutes(): Hono<AccessEnv> {
@@ -39,10 +39,9 @@ export function searchRoutes(): Hono<AccessEnv> {
         return c.json({ results });
       }
 
-      // No mailbox scope requested: search broadly, then filter to owned ones.
-      const owned = await getOwnedMailboxIds(c.env, user);
-      const all = await searchMessages(c.env, q);
-      const results = all.filter((m: Message) => owned.has(m.mailbox_id));
+      // No mailbox scope requested: search across the caller's owned mailboxes,
+      // scoped in SQL so the LIMIT applies to owned rows only.
+      const results = await searchMessagesForOwner(c.env, q, user.email);
       return c.json({ results });
     } catch {
       return c.json({ error: "search failed" }, 500);

@@ -22,6 +22,7 @@ vi.mock("../src/db", () => ({
   getThreadsForOwner: vi.fn(),
   getMessage: vi.fn(),
   searchMessages: vi.fn(),
+  searchMessagesForOwner: vi.fn(),
   getMailboxesForUser: vi.fn(),
 }));
 
@@ -30,6 +31,7 @@ import {
   getThreadsForOwner,
   getMessage,
   searchMessages,
+  searchMessagesForOwner,
   getMailboxesForUser,
 } from "../src/db";
 import { readRoutes } from "../src/api/routes";
@@ -38,6 +40,7 @@ const mGetThreads = vi.mocked(getThreads);
 const mGetThreadsForOwner = vi.mocked(getThreadsForOwner);
 const mGetMessage = vi.mocked(getMessage);
 const mSearchMessages = vi.mocked(searchMessages);
+const mSearchMessagesForOwner = vi.mocked(searchMessagesForOwner);
 const mGetMailboxesForUser = vi.mocked(getMailboxesForUser);
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -271,15 +274,22 @@ describe("GET /search", () => {
     expect(mSearchMessages).not.toHaveBeenCalled();
   });
 
-  it("filters out results from non-owned mailboxes when no mailbox given", async () => {
-    mSearchMessages.mockResolvedValue([
+  it("uses owner-scoped SQL search (scoped before LIMIT) when no mailbox given", async () => {
+    // The route must NOT do a global search + JS filter (that lets other users'
+    // matches crowd out the caller's hits and materializes cross-user rows).
+    mSearchMessagesForOwner.mockResolvedValue([
       makeMessage({ id: "ok", mailbox_id: "mb-alice" }) as Message,
-      makeMessage({ id: "leak", mailbox_id: "mb-eve" }) as Message,
     ]);
     const res = await dispatch("/search?q=hi");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { results: Message[] };
     expect(body.results.map((m) => m.id)).toEqual(["ok"]);
+    expect(mSearchMessagesForOwner).toHaveBeenCalledWith(
+      expect.anything(),
+      "hi",
+      USER.email,
+    );
+    expect(mSearchMessages).not.toHaveBeenCalled();
   });
 
   it("500 when db throws", async () => {

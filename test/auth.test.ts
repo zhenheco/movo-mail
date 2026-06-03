@@ -19,9 +19,11 @@ import type { Env, Mailbox } from "../src/types";
 // export, so we mock the module rather than spy on a namespace object.
 vi.mock("../src/db", () => ({
   getMailboxesForUser: vi.fn(),
+  getUserRole: vi.fn(),
 }));
-import { getMailboxesForUser } from "../src/db";
+import { getMailboxesForUser, getUserRole } from "../src/db";
 const getMailboxesForUserMock = vi.mocked(getMailboxesForUser);
+const getUserRoleMock = vi.mocked(getUserRole);
 
 /**
  * Cloudflare Access JWT verification tests.
@@ -135,10 +137,13 @@ beforeAll(async () => {
 beforeEach(() => {
   // Default: the user owns a mailbox. Cases that need otherwise override.
   getMailboxesForUserMock.mockResolvedValue([mailbox("alice@movo.com.my")]);
+  // Default role is non-admin; only the no-mailbox branch consults it.
+  getUserRoleMock.mockResolvedValue("user");
 });
 
 afterEach(() => {
   getMailboxesForUserMock.mockReset();
+  getUserRoleMock.mockReset();
 });
 
 describe("accessAuth", () => {
@@ -189,13 +194,25 @@ describe("accessAuth", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 when the verified email owns no mailbox", async () => {
+  it("returns 403 when a non-admin verified email owns no mailbox", async () => {
     getMailboxesForUserMock.mockResolvedValue([]);
+    getUserRoleMock.mockResolvedValue("user");
     const token = await signToken({ email: "stranger@movo.com.my" });
     const res = await call(token, makeEnv());
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
     expect(typeof body.error).toBe("string");
+  });
+
+  it("lets an ADMIN with no mailbox through (so they can bootstrap the first one)", async () => {
+    getMailboxesForUserMock.mockResolvedValue([]);
+    getUserRoleMock.mockResolvedValue("admin");
+    const token = await signToken({ email: "admin@gmail.com" });
+    const res = await call(token, makeEnv());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; user: { email: string } };
+    expect(body.ok).toBe(true);
+    expect(body.user.email).toBe("admin@gmail.com");
   });
 
   it("returns 401 (not 500) when the token has no email claim", async () => {

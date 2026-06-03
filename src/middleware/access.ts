@@ -16,7 +16,7 @@ import {
   type JWTVerifyGetKey,
 } from "jose";
 import type { Env, AccessUser } from "../types";
-import { getMailboxesForUser } from "../db";
+import { getMailboxesForUser, getUserRole } from "../db";
 
 /** Hono variable map populated by this middleware. */
 export interface AccessVariables {
@@ -91,8 +91,11 @@ function stringClaim(payload: JWTPayload, key: string): string | null {
  * On success: verifies the JWT signature against the team JWKS, checks
  * `aud === env.CF_ACCESS_AUD` and `iss === env.CF_ACCESS_TEAM_DOMAIN`, maps the
  * verified email to a mailbox, then sets `c.set('user', { sub, email, name })`.
- * On any verification failure returns 401; on a verified user without a mailbox
- * returns 403. Errors never leak internal details to the client.
+ * On any verification failure returns 401; a verified NON-ADMIN without a
+ * mailbox returns 403. A verified ADMIN with no mailbox is allowed through so
+ * they can bootstrap the first mailbox from the settings panel — this grants no
+ * data, as every resource route is still ownership/role-scoped. Errors never
+ * leak internal details to the client.
  */
 export function accessAuth(
   options: AccessAuthOptions = {},
@@ -139,10 +142,21 @@ export function accessAuth(
       return c.json({ error: "Unable to verify your account." }, 401);
     }
     if (!ownsMailbox) {
-      return c.json(
-        { error: "No mailbox is provisioned for this account." },
-        403,
-      );
+      // A zero-mailbox ADMIN must still pass so they can create the first
+      // mailbox from the settings panel; otherwise the only bootstrap path is a
+      // manual D1 write. Non-admins with no mailbox are denied as before.
+      let role: string | null;
+      try {
+        role = await getUserRole(c.env, email);
+      } catch {
+        return c.json({ error: "Unable to verify your account." }, 401);
+      }
+      if (role !== "admin") {
+        return c.json(
+          { error: "No mailbox is provisioned for this account." },
+          403,
+        );
+      }
     }
 
     const name = stringClaim(payload, "name");
