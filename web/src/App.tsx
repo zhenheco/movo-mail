@@ -3,13 +3,16 @@
  *
  * Three regions: Inbox (ThreadList) | Thread reader (ThreadView) | Compose.
  *
- * Active-mailbox resolution precedence (a logged-in user never types an id):
- *   1. Override — ?mailbox= URL query or VITE_DEFAULT_MAILBOX (for switching
- *      between owned mailboxes / debugging). Resolved synchronously.
- *   2. Otherwise — GET /api/mailboxes on mount and pick the FIRST mailbox the
- *      caller owns (its id drives the inbox; its address drives the From header).
- * If the user owns zero mailboxes we show a "contact your administrator" empty
- * state; on a fetch error we surface the friendly ApiError message.
+ * Active-mailbox resolution (a logged-in user never types an id). On mount we
+ * GET /api/mailboxes (every mailbox the caller OWNS — one Gmail can own several
+ * @movo.com.my addresses) and pick the active one via resolveActiveMailboxId:
+ *   1. ?mailbox= URL query / VITE_DEFAULT_MAILBOX override, if it is owned;
+ *   2. the last switcher choice persisted in localStorage, if it is owned;
+ *   3. otherwise the first owned mailbox.
+ * When the caller owns more than one, a MailboxSwitcher (in ThreadList) lets
+ * them change the active mailbox — which drives both the inbox and the Compose
+ * From address. Owning zero mailboxes shows a "contact your administrator"
+ * empty state; a fetch error surfaces the friendly ApiError message.
  *
  * Selection model: the read API exposes /message/:id (not a per-thread list),
  * so the reader is keyed by a message id. Inbox thread rows and search hits both
@@ -18,8 +21,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageWithAttachments, Thread } from "./lib/types";
-import { resolveFromAddress, resolveMailboxId } from "./lib/mailbox";
-import { ApiError, fetchMailboxes, fetchMe } from "./lib/api";
+import {
+  resolveActiveMailboxId,
+  resolveFromAddress,
+  resolveMailboxId,
+} from "./lib/mailbox";
+import {
+  ApiError,
+  fetchMailboxes,
+  fetchMe,
+  type MailboxSummary,
+} from "./lib/api";
 import { selectionForThread } from "./lib/selection";
 import { blankDraft, replyDraft, type ComposeDraft } from "./lib/compose";
 import { ThreadList } from "./components/ThreadList";
@@ -28,21 +40,38 @@ import { Compose } from "./components/Compose";
 import { AdminPanel } from "./components/AdminPanel";
 import { EmptyState } from "./components/ui/feedback";
 
-/** Resolved active mailbox: its id (for scoping) + From address (for sends). */
-interface ResolvedMailbox {
-  id: string;
-  address: string;
-}
+/** localStorage key remembering the last active mailbox across reloads. */
+const ACTIVE_MAILBOX_KEY = "movo:activeMailbox";
 
 /** Discriminated state machine for mailbox resolution. */
 type MailboxState =
   | { status: "loading" }
-  | { status: "resolved"; mailbox: ResolvedMailbox }
+  | { status: "ready"; boxes: MailboxSummary[]; activeId: string }
   | { status: "empty" }
   | { status: "error"; message: string };
 
+/** Read the stored active-mailbox id (tolerates SSR / disabled storage). */
+function readStoredMailboxId(): string | null {
+  try {
+    return typeof window !== "undefined"
+      ? window.localStorage.getItem(ACTIVE_MAILBOX_KEY)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the active-mailbox id (best-effort; storage may be unavailable). */
+function storeMailboxId(id: string): void {
+  try {
+    window.localStorage.setItem(ACTIVE_MAILBOX_KEY, id);
+  } catch {
+    // Storage unavailable (private mode / quota) — selection stays in-memory.
+  }
+}
+
 export default function App() {
-  // Synchronous override (query / env). When present we skip the API entirely.
+  // Override id from ?mailbox= / VITE_DEFAULT_MAILBOX (honored only if owned).
   const override = useMemo(
     () =>
       resolveMailboxId(
@@ -52,53 +81,27 @@ export default function App() {
     [],
   );
 
-  const [mailboxState, setMailboxState] = useState<MailboxState>(() =>
-    override
-      ? {
-          status: "resolved",
-          mailbox: {
-            id: override,
-            address: resolveFromAddress(
-              import.meta.env as unknown as Record<string, string | undefined>,
-              override,
-            ),
-          },
-        }
-      : { status: "loading" },
-  );
+  const [mailboxState, setMailboxState] = useState<MailboxState>({
+    status: "loading",
+  });
 
   useEffect(() => {
-    // Override already resolved synchronously — no API call needed.
-    if (override) {
-      return;
-    }
     let cancelled = false;
     fetchMailboxes()
       .then((boxes) => {
         if (cancelled) {
           return;
         }
-        const first = boxes[0];
-        if (!first) {
+        const activeId = resolveActiveMailboxId(
+          boxes.map((b) => b.id),
+          override,
+          readStoredMailboxId(),
+        );
+        if (!activeId) {
           setMailboxState({ status: "empty" });
           return;
         }
-        setMailboxState({
-          status: "resolved",
-          mailbox: {
-            id: first.id,
-            // Prefer the resolved mailbox address; fall back to env/id.
-            address:
-              first.address ||
-              resolveFromAddress(
-                import.meta.env as unknown as Record<
-                  string,
-                  string | undefined
-                >,
-                first.id,
-              ),
-          },
-        });
+        setMailboxState({ status: "ready", boxes, activeId });
       })
       .catch((err: unknown) => {
         if (cancelled) {
@@ -168,8 +171,15 @@ export default function App() {
     );
   }
 
-  const mailboxId = mailboxState.mailbox.id;
-  const fromAddress = mailboxState.mailbox.address;
+  const { boxes, activeId } = mailboxState;
+  const activeBox = boxes.find((b) => b.id === activeId);
+  const mailboxId = activeId;
+  const fromAddress =
+    activeBox?.address ||
+    resolveFromAddress(
+      import.meta.env as unknown as Record<string, string | undefined>,
+      activeId,
+    );
 
   // Admin settings panel replaces the main pane while open. Guarded by isAdmin
   // so a stale flag (or a non-admin) can never reach it.
@@ -212,11 +222,21 @@ export default function App() {
     setCompose(null);
   }
 
+  /** Switch the active mailbox: persist, scope the inbox, reset the open view. */
+  function handleSwitchMailbox(id: string) {
+    if (mailboxState.status !== "ready" || id === mailboxState.activeId) {
+      return;
+    }
+    storeMailboxId(id);
+    setMailboxState({ ...mailboxState, activeId: id });
+    handleHome();
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       <ThreadList
         // key forces a fresh mount (and refetch) when we want the inbox to reload
-        key={`inbox-${inboxNonce}`}
+        key={`inbox-${mailboxId}-${inboxNonce}`}
         mailboxId={mailboxId}
         selectedThreadId={selectedThreadId}
         onSelectThread={handleSelectThread}
@@ -224,6 +244,8 @@ export default function App() {
         onCompose={handleCompose}
         onHome={handleHome}
         onOpenSettings={isAdmin ? () => setShowSettings(true) : undefined}
+        mailboxes={boxes}
+        onSwitchMailbox={handleSwitchMailbox}
       />
 
       <main aria-label="Conversation" className="flex flex-1 flex-col overflow-hidden">

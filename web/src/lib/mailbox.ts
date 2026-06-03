@@ -49,3 +49,29 @@ export function resolveFromAddress(
   }
   return mailboxId;
 }
+
+/**
+ * Pick the ACTIVE mailbox id from the caller's owned set, for the multi-mailbox
+ * switcher. Precedence (only ids actually owned are eligible, since the read API
+ * scopes to owned mailboxes anyway):
+ *   1. `override` — the ?mailbox= query / VITE_DEFAULT_MAILBOX, if it is owned.
+ *   2. `stored`   — the last switcher choice (localStorage), if it is owned.
+ *   3. the first owned mailbox.
+ * Returns null only when the caller owns no mailboxes.
+ */
+export function resolveActiveMailboxId(
+  ownedIds: string[],
+  override: string | null,
+  stored: string | null,
+): string | null {
+  if (ownedIds.length === 0) {
+    return null;
+  }
+  if (override && ownedIds.includes(override)) {
+    return override;
+  }
+  if (stored && ownedIds.includes(stored)) {
+    return stored;
+  }
+  return ownedIds[0]!;
+}

@@ -7,12 +7,13 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { Message, Thread } from "../lib/types";
-import { fetchThreads, searchMessages } from "../lib/api";
+import { fetchThreads, searchMessages, type MailboxSummary } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { formatDate } from "../lib/format";
 import { cn } from "../lib/cn";
 import { Input } from "./ui/input";
 import { Button } from "./ui/button";
+import { MailboxSwitcher } from "./MailboxSwitcher";
 import { EmptyState, ErrorState, LoadingState } from "./ui/feedback";
 
 export interface ThreadListProps {
@@ -26,6 +27,10 @@ export interface ThreadListProps {
   onHome: () => void;
   /** Admin-only: open the mailbox settings panel. Omitted for non-admins. */
   onOpenSettings?: () => void;
+  /** All owned mailboxes — drives the switcher (rendered only when >1). */
+  mailboxes?: MailboxSummary[];
+  /** Switch the active mailbox. */
+  onSwitchMailbox?: (id: string) => void;
 }
 
 export function ThreadList({
@@ -36,6 +41,8 @@ export function ThreadList({
   onCompose,
   onHome,
   onOpenSettings,
+  mailboxes,
+  onSwitchMailbox,
 }: ThreadListProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
@@ -91,6 +98,15 @@ export function ThreadList({
           </Button>
         ) : null}
       </header>
+
+      {/* Mailbox switcher — only when the user owns more than one mailbox. */}
+      {mailboxes && mailboxes.length > 1 && onSwitchMailbox ? (
+        <MailboxSwitcher
+          mailboxes={mailboxes}
+          activeId={mailboxId}
+          onSwitch={onSwitchMailbox}
+        />
+      ) : null}
 
       {/* Gmail-style raised "Compose" pill above the inbox. */}
       <div className="px-3 pb-3">
