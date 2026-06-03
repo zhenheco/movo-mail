@@ -65,6 +65,7 @@ function AddMailboxForm({ onAdded }: { onAdded: () => void }) {
   const [displayName, setDisplayName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const reset = useCallback(() => {
     setAddress("");
@@ -86,14 +87,20 @@ function AddMailboxForm({ onAdded }: { onAdded: () => void }) {
     }
     setSubmitting(true);
     setError(null);
+    setNotice(null);
     try {
-      await createAdminMailbox({
+      const result = await createAdminMailbox({
         address: trimmedAddress,
         ownerEmail: trimmedOwner,
         ...(trimmedName ? { displayName: trimmedName } : {}),
       });
       reset();
       onAdded();
+      setNotice(
+        result.welcomeEmailSent
+          ? `Mailbox added. A sign-in email was sent to ${trimmedOwner}.`
+          : `Mailbox added, but the sign-in email to ${trimmedOwner} could not be sent — share the login link manually.`,
+      );
     } catch (err: unknown) {
       setError(
         err instanceof ApiError
@@ -154,6 +161,7 @@ function AddMailboxForm({ onAdded }: { onAdded: () => void }) {
         </label>
 
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
+        {notice ? <p className="text-sm text-emerald-600">{notice}</p> : null}
 
         <div className="flex justify-end">
           <Button type="submit" size="sm" disabled={submitting}>

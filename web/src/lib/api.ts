@@ -270,17 +270,22 @@ export async function fetchAdminMailboxes(): Promise<AdminMailbox[]> {
 }
 
 /**
- * POST /api/admin/mailboxes — create a managed mailbox (a pure D1 write; the
- * catch-all already routes every address to the worker). Surfaces server 4xx
- * messages (e.g. 409 duplicate, 400 bad address) via ApiError.
+ * POST /api/admin/mailboxes — create a managed mailbox (a D1 write; the
+ * catch-all already routes every address to the worker). The server then sends
+ * a best-effort welcome email to the owner's login email and reports whether it
+ * went out via `welcomeEmailSent`. Surfaces server 4xx messages (e.g. 409
+ * duplicate, 400 bad address) via ApiError.
  */
 export async function createAdminMailbox(
   body: CreateAdminMailboxBody,
-): Promise<{ id: string }> {
-  return await request<{ id: string }>(`/admin/mailboxes`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+): Promise<{ id: string; welcomeEmailSent: boolean }> {
+  return await request<{ id: string; welcomeEmailSent: boolean }>(
+    `/admin/mailboxes`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 /**

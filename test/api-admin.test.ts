@@ -34,6 +34,13 @@ vi.mock("../src/db", () => ({
   },
 }));
 
+// The welcome email is a separate, best-effort concern — mock it so the route
+// tests assert only that it is invoked with the right inputs and that a send
+// failure never blocks the (already-committed) mailbox creation.
+vi.mock("../src/lib/welcome", () => ({
+  sendWelcomeEmail: vi.fn(),
+}));
+
 import {
   getUserRole,
   listAllMailboxes,
@@ -41,12 +48,14 @@ import {
   deleteMailbox,
   MailboxExistsError,
 } from "../src/db";
+import { sendWelcomeEmail } from "../src/lib/welcome";
 import { meRoutes, adminRoutes } from "../src/api/routes";
 
 const mGetUserRole = vi.mocked(getUserRole);
 const mListAllMailboxes = vi.mocked(listAllMailboxes);
 const mCreateMailbox = vi.mocked(createMailbox);
 const mDeleteMailbox = vi.mocked(deleteMailbox);
+const mSendWelcome = vi.mocked(sendWelcomeEmail);
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 const ADMIN: AccessUser = { sub: "u-admin", email: "boss@movo.com.my" };
@@ -221,6 +230,49 @@ describe("POST /admin/mailboxes (admin)", () => {
       ownerEmail: "owner@movo.com.my",
       displayName: "New Box",
     });
+  });
+
+  it("sends a welcome email to the owner and reports welcomeEmailSent: true", async () => {
+    mCreateMailbox.mockResolvedValue({ id: "mb-new" });
+    mSendWelcome.mockResolvedValue(undefined);
+    const res = await dispatch(ADMIN, "/admin/mailboxes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: "new@movo.com.my",
+        ownerEmail: "owner@gmail.com",
+        displayName: "New Box",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string; welcomeEmailSent: boolean };
+    expect(body.id).toBe("mb-new");
+    expect(body.welcomeEmailSent).toBe(true);
+    // Recipient is the owner login email; loginUrl is derived from the request
+    // origin (http://localhost under the Hono test harness).
+    expect(mSendWelcome).toHaveBeenCalledWith(expect.anything(), {
+      address: "new@movo.com.my",
+      ownerEmail: "owner@gmail.com",
+      displayName: "New Box",
+      loginUrl: "http://localhost",
+    });
+  });
+
+  it("still returns 201 with welcomeEmailSent: false when the welcome email fails", async () => {
+    mCreateMailbox.mockResolvedValue({ id: "mb-new" });
+    mSendWelcome.mockRejectedValue(new Error("relay down"));
+    const res = await dispatch(ADMIN, "/admin/mailboxes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: "new@movo.com.my",
+        ownerEmail: "owner@gmail.com",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string; welcomeEmailSent: boolean };
+    expect(body.id).toBe("mb-new");
+    expect(body.welcomeEmailSent).toBe(false);
   });
 
   it("400 when the address is not @movo.com.my", async () => {

@@ -2,7 +2,7 @@
  * Admin route — self-service mailbox management for users with role='admin'.
  *
  *   GET    /admin/mailboxes      → { mailboxes: AdminMailbox[] }
- *   POST   /admin/mailboxes      → 201 { id }   (body { address, ownerEmail, displayName? })
+ *   POST   /admin/mailboxes      → 201 { id, welcomeEmailSent }   (body { address, ownerEmail, displayName? })
  *   DELETE /admin/mailboxes/:id  → 200 { ok: true } | 404
  *
  * Authorization: every /admin/* handler resolves the caller's role via
@@ -10,9 +10,13 @@
  * unless the role is exactly 'admin'. This is enforced by an in-router
  * middleware mounted on `/admin/*` so a new handler cannot accidentally skip it.
  *
- * Adding a mailbox is a PURE D1 write (createMailbox) — no Cloudflare API call,
+ * Adding a mailbox is a D1 write (createMailbox) — no Cloudflare API call,
  * because the Email Routing catch-all already routes every address to this
- * Worker, so a new D1 mailbox row immediately starts being stored.
+ * Worker, so a new D1 mailbox row immediately starts being stored. After the
+ * row is committed, a best-effort welcome/activation email is sent to the
+ * owner's login (Google) email via the cf-email relay (src/lib/welcome); a send
+ * failure is swallowed and reported as `welcomeEmailSent: false`, never failing
+ * the request.
  *
  * Role-escalation guard: there is intentionally NO endpoint to change a user's
  * role (roles are seeded out-of-band). createMailbox never accepts or sets a
@@ -29,6 +33,7 @@ import {
   MailboxExistsError,
   type CreateMailboxInput,
 } from "../db";
+import { sendWelcomeEmail } from "../lib/welcome";
 
 /**
  * Allowed mailbox address shape: a local part with no whitespace/@, on the
@@ -104,15 +109,35 @@ export function adminRoutes(): Hono<AccessEnv> {
     }
 
     const input: CreateMailboxInput = { address, ownerEmail, displayName };
+    let id: string;
     try {
-      const { id } = await createMailbox(c.env, input);
-      return c.json({ id }, 201);
+      ({ id } = await createMailbox(c.env, input));
     } catch (err) {
       if (err instanceof MailboxExistsError) {
         return c.json({ error: "Address already exists." }, 409);
       }
       return c.json({ error: "Unable to create mailbox." }, 500);
     }
+
+    // Best-effort welcome/activation email to the owner's login (Google) email.
+    // The mailbox row is already committed, so a send failure must NEVER fail
+    // the request — we only report whether the notice went out. loginUrl is the
+    // origin of the admin's own request (the canonical Access-protected webmail
+    // URL), so it needs no separate config.
+    let welcomeEmailSent = false;
+    try {
+      await sendWelcomeEmail(c.env, {
+        address,
+        displayName,
+        ownerEmail,
+        loginUrl: new URL(c.req.url).origin,
+      });
+      welcomeEmailSent = true;
+    } catch (err) {
+      console.error("welcome email failed", err);
+    }
+
+    return c.json({ id, welcomeEmailSent }, 201);
   });
 
   app.delete("/admin/mailboxes/:id", async (c) => {
