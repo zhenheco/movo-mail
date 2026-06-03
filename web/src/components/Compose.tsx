@@ -10,7 +10,7 @@
  *   - Every async action has its own loading + error surface.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ComposeDraft } from "../lib/compose";
 import { buildSendRequest } from "../lib/compose";
@@ -34,6 +34,7 @@ export interface ComposeProps {
 type SendPhase = "idle" | "sending" | "error" | "sent";
 
 export function Compose({ fromAddress, initial, onClose, onSent }: ComposeProps) {
+  const idempotencyKeyRef = useRef(crypto.randomUUID());
   const [to, setTo] = useState(initial.to);
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
@@ -97,7 +98,7 @@ export function Compose({ fromAddress, initial, onClose, onSent }: ComposeProps)
         inReplyTo: initial.inReplyTo,
         references: initial.references,
       });
-      const result = await sendMessage(payload);
+      const result = await sendMessage(payload, idempotencyKeyRef.current);
       setSendPhase("sent");
       onSent(result.id);
     } catch (err) {

@@ -110,9 +110,6 @@ export interface MessageResponse {
 export interface SearchResponse {
   results: Message[];
 }
-export interface SendResponse {
-  result: SendResult;
-}
 export interface AiDraftResponse {
   draft: AiDraftResult;
 }

@@ -134,6 +134,10 @@ export function normalizeAddress(addr: string): string {
   return addr.trim().toLowerCase();
 }
 
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 /** Booleans are stored as SQLite 0/1 integers. */
 const bool = (b: boolean): number => (b ? 1 : 0);
 
@@ -352,7 +356,7 @@ export async function getMailboxesForUser(
         WHERE u.email = ?
         ORDER BY m.address ASC`,
     )
-      .bind(userEmail)
+      .bind(normalizeEmail(userEmail))
       .all<Mailbox>();
     return (results ?? []).map((r) => ({ ...r }));
   });
@@ -369,7 +373,7 @@ export async function getUserByEmail(
          FROM users
         WHERE email = ?`,
     )
-      .bind(email)
+      .bind(normalizeEmail(email))
       .first<User>();
     return row ? { ...row } : null;
   });
@@ -384,7 +388,7 @@ export async function getUserRole(
     const row = await env.DB.prepare(
       `SELECT role FROM users WHERE email = ?`,
     )
-      .bind(email)
+      .bind(normalizeEmail(email))
       .first<{ role: UserRole }>();
     return row?.role ?? null;
   });
@@ -472,6 +476,7 @@ export async function upsertUserByEmail(
   return guard("upsertUserByEmail", async () => {
     const id = uuid();
     const now = Date.now();
+    const normalizedEmail = normalizeEmail(email);
     // Insert when new; on email conflict only refresh name/updated_at. role is
     // deliberately excluded from the UPDATE so a granted admin stays admin.
     await env.DB.prepare(
@@ -481,12 +486,12 @@ export async function upsertUserByEmail(
          name = COALESCE(excluded.name, users.name),
          updated_at = excluded.updated_at`,
     )
-      .bind(id, email, name, now, now)
+      .bind(id, normalizedEmail, name, now, now)
       .run();
 
     // The generated id is only used if WE inserted; otherwise read the real id.
     const row = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`)
-      .bind(email)
+      .bind(normalizedEmail)
       .first<{ id: string }>();
     return row?.id ?? id;
   });

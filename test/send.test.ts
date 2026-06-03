@@ -13,7 +13,7 @@
  *
  * Signatures mirror the real db contract exactly:
  *   getThread(env, id)             -> ThreadWithMessages | null
- *   getMailboxByAddress(env, addr) -> Mailbox | null
+ *   getMailboxesForUser(env, email) -> Mailbox[]
  *   insertOutboundMessage(env, m)  -> Promise<string>
  *   insertSendLog(env, input)      -> Promise<string>
  *   insertAudit(env, input)        -> Promise<string>
@@ -27,14 +27,14 @@ import type { Env, AccessUser, Mailbox, SendRequest, SendResult } from "../src/t
 
 // ── mock the db contract (env-first signatures, matching src/db/index.ts) ─────
 const getThread = vi.fn((..._args: unknown[]): unknown => null);
-const getMailboxByAddress = vi.fn((..._args: unknown[]): unknown => null);
+const getMailboxesForUser = vi.fn((..._args: unknown[]): unknown => []);
 const insertOutboundMessage = vi.fn(async (..._args: unknown[]): Promise<string> => "msg-row-1");
 const insertSendLog = vi.fn(async (..._args: unknown[]): Promise<string> => "send-log-1");
 const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit-1");
 
 vi.mock("../src/db", () => ({
   getThread: (...a: unknown[]) => getThread(...a),
-  getMailboxByAddress: (...a: unknown[]) => getMailboxByAddress(...a),
+  getMailboxesForUser: (...a: unknown[]) => getMailboxesForUser(...a),
   insertOutboundMessage: (...a: unknown[]) => insertOutboundMessage(...a),
   insertSendLog: (...a: unknown[]) => insertSendLog(...a),
   insertAudit: (...a: unknown[]) => insertAudit(...a),
@@ -46,16 +46,16 @@ import { sendViaCfEmail } from "../src/lib/cfemail";
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 const USER: AccessUser = {
-  sub: "usr_alice",
-  email: "alice@movo.com.my",
-  name: "Alice",
+  sub: "usr_nelson",
+  email: "nelson@gmail.com",
+  name: "Nelson",
 };
 
 const MAILBOX: Mailbox = {
-  id: "mbx_alice",
-  address: "alice@movo.com.my",
-  display_name: "Alice",
-  owner_id: "usr_alice",
+  id: "mbx_sales",
+  address: "sales@movo.com.my",
+  display_name: "Sales",
+  owner_id: "usr_nelson",
   created_at: 0,
   updated_at: 0,
 };
@@ -83,7 +83,7 @@ function threadWith(messageId: string, references: string | null) {
         direction: "inbound",
         from_address: "bob@example.com",
         from_name: "Bob",
-        to_addresses: JSON.stringify(["alice@movo.com.my"]),
+        to_addresses: JSON.stringify(["sales@movo.com.my"]),
         cc_addresses: null,
         bcc_addresses: null,
         subject: "Order #1",
@@ -120,7 +120,7 @@ function makeEnv(kv?: KVNamespace): Env {
   return {
     DB: {} as unknown as D1Database,
     MAIL_R2: { put: vi.fn(async () => undefined) } as unknown as R2Bucket,
-    MAIL_KV: kv ?? ({} as unknown as KVNamespace),
+    MAIL_KV: kv ?? memKv(),
     ASSETS: {} as unknown as Fetcher,
     CF_EMAIL_ENDPOINT: "https://cf-email.example.workers.dev",
     CF_EMAIL_API_KEY: "cfes_test_key",
@@ -178,7 +178,7 @@ function postBody(body: unknown): Request {
 beforeEach(() => {
   vi.restoreAllMocks();
   getThread.mockReset();
-  getMailboxByAddress.mockReset();
+  getMailboxesForUser.mockReset();
   insertOutboundMessage.mockClear();
   insertSendLog.mockClear();
   insertAudit.mockClear();
@@ -186,7 +186,7 @@ beforeEach(() => {
   insertSendLog.mockResolvedValue("send-log-1");
   insertAudit.mockResolvedValue("audit-1");
   getThread.mockResolvedValue(null);
-  getMailboxByAddress.mockResolvedValue(MAILBOX);
+  getMailboxesForUser.mockResolvedValue([MAILBOX]);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +278,7 @@ describe("POST /send", () => {
         to: [{ address: "bob@example.com" }],
         subject: "Hi",
         text: "hello",
+        mailboxId: MAILBOX.id,
       }),
       makeEnv(),
     );
@@ -285,8 +286,65 @@ describe("POST /send", () => {
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const sent = sentBody(fetchMock);
-    expect(sent.from).toBe("alice@movo.com.my");
+    expect(sent.from).toBe(MAILBOX.address);
     expect(String(sent.from)).not.toContain("evil.com");
+  });
+
+  it("rejects a mailboxId the authenticated user does not own", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: "mbx_not_owned",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires mailboxId when the authenticated user owns multiple mailboxes", async () => {
+    getMailboxesForUser.mockResolvedValue([
+      MAILBOX,
+      {
+        ...MAILBOX,
+        id: "mbx_ops",
+        address: "ops@movo.com.my",
+      },
+    ]);
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the sole owned mailbox when mailboxId is omitted", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(sentBody(fetchMock).from).toBe(MAILBOX.address);
   });
 
   it("passes In-Reply-To/References derived from the replied thread", async () => {
@@ -301,6 +359,7 @@ describe("POST /send", () => {
         subject: "Re: thing",
         text: "reply body",
         threadId: "thr_1",
+        mailboxId: MAILBOX.id,
       }),
       makeEnv(),
     );
@@ -317,7 +376,12 @@ describe("POST /send", () => {
   it("does not send threading headers for a brand-new message (no threadId)", async () => {
     const fetchMock = stubRelay(relayOk());
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "New", text: "x" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "New",
+        text: "x",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
     expect(res.status).toBe(200);
@@ -330,7 +394,12 @@ describe("POST /send", () => {
     stubRelay(relayOk());
 
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "hello" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
 
@@ -358,7 +427,12 @@ describe("POST /send", () => {
     stubRelay(relayOk());
 
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "New thread", text: "hello" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "New thread",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
 
@@ -372,7 +446,12 @@ describe("POST /send", () => {
     stubRelay(relayOk("suppressed"));
 
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "blocked@example.com" }], subject: "Hi", text: "hello" }),
+      postBody({
+        to: [{ address: "blocked@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
 
@@ -388,7 +467,12 @@ describe("POST /send", () => {
   it("logs a failed send and returns 502 when the relay errors", async () => {
     stubRelay(() => new Response("err", { status: 500 }));
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "hello" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
     expect(res.status).toBe(502);
@@ -400,7 +484,7 @@ describe("POST /send", () => {
   it("rejects an empty recipient list with 400 and does not call the relay", async () => {
     const fetchMock = stubRelay(relayOk());
     const res = await makeApp().fetch(
-      postBody({ to: [], subject: "Hi", text: "x" }),
+      postBody({ to: [], subject: "Hi", text: "x", mailboxId: MAILBOX.id }),
       makeEnv(),
     );
     expect(res.status).toBe(400);
@@ -408,10 +492,15 @@ describe("POST /send", () => {
   });
 
   it("returns 403 when the caller has no provisioned mailbox", async () => {
-    getMailboxByAddress.mockResolvedValue(null);
+    getMailboxesForUser.mockResolvedValue([]);
     const fetchMock = stubRelay(relayOk());
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "x" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "x",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(),
     );
     expect(res.status).toBe(403);
@@ -427,7 +516,12 @@ describe("POST /send", () => {
     const fetchMock = stubRelay(relayOk());
 
     const res = await makeApp().fetch(
-      postBody({ to: [{ address: "bob@example.com" }], subject: "Hi", text: "x" }),
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "x",
+        mailboxId: MAILBOX.id,
+      }),
       makeEnv(kv),
     );
 
@@ -451,6 +545,7 @@ describe("POST /send", () => {
           to: [{ address: "bob@example.com" }],
           subject: "Hi",
           text: "hello",
+          mailboxId: MAILBOX.id,
         }),
       });
 

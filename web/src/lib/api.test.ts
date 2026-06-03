@@ -213,13 +213,49 @@ describe("api client fetch", () => {
       throw new TypeError("Failed to fetch");
     }) as unknown as typeof fetch;
     await expect(
-      sendMessage({
+      sendMessage(
+        {
+          from: { address: "me@movo.com.my" },
+          to: [{ address: "x@y.com" }],
+          subject: "s",
+          text: "t",
+        },
+        "retry-key-1",
+      ),
+    ).rejects.toMatchObject({ status: 0 });
+  });
+
+  it("sendMessage returns the flat server result and sends an Idempotency-Key", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          id: "cfes_1",
+          status: "sent",
+          messageId: "m1",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await sendMessage(
+      {
         from: { address: "me@movo.com.my" },
         to: [{ address: "x@y.com" }],
         subject: "s",
         text: "t",
-      }),
-    ).rejects.toMatchObject({ status: 0 });
+      },
+      "k1",
+    );
+
+    expect(result.id).toBe("cfes_1");
+    expect(result.status).toBe("sent");
+    const call = fetchMock.mock.calls[0] as unknown as
+      | [string, RequestInit]
+      | undefined;
+    expect(call?.[0]).toBe("/api/send");
+    expect(call?.[1].headers).toMatchObject({ "Idempotency-Key": "k1" });
   });
 });
 
@@ -280,15 +316,9 @@ describe("createAdminMailbox", () => {
     vi.restoreAllMocks();
   });
 
-  it("POSTs the body as JSON to /api/admin/mailboxes and returns the mailbox", async () => {
-    const created = {
-      id: "mb-9",
-      address: "sales@movo.com.my",
-      displayName: "Sales",
-      ownerEmail: "owner@movo.com.my",
-    };
+  it("POSTs the body as JSON to /api/admin/mailboxes and returns the created id", async () => {
     const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ mailbox: created }), {
+      new Response(JSON.stringify({ id: "mb-9" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       }),
@@ -301,7 +331,7 @@ describe("createAdminMailbox", () => {
       displayName: "Sales",
     });
 
-    expect(result).toEqual(created);
+    expect(result.id).toBe("mb-9");
     // Correct path.
     const call = fetchMock.mock.calls[0] as unknown as
       | [string, RequestInit]

@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 
 import {
   getUserByEmail,
+  getMailboxesForUser,
   upsertUserByEmail,
   getUserRole,
   listAllMailboxes,
@@ -189,6 +190,23 @@ describe("db admin (real SQL via node:sqlite, 0001+0002 applied)", () => {
     it("getUserByEmail is injection-safe (literal match)", async () => {
       await upsertUserByEmail(env, "real@movo.com.my", null);
       expect(await getUserByEmail(env, "x' OR '1'='1")).toBeNull();
+    });
+
+    it("matches stored users by normalized email casing for ownership and roles", async () => {
+      await createMailbox(env, {
+        address: "support@movo.com.my",
+        ownerEmail: "Owner@Gmail.Com",
+        displayName: "Support",
+      });
+
+      const mailboxes = await getMailboxesForUser(env, "owner@gmail.com");
+      expect(mailboxes.map((m) => m.address)).toEqual(["support@movo.com.my"]);
+
+      const adminId = await upsertUserByEmail(env, "Admin@Gmail.Com", null);
+      await env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`)
+        .bind(adminId)
+        .run();
+      expect(await getUserRole(env, "admin@gmail.com")).toBe("admin");
     });
   });
 

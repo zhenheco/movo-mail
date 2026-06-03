@@ -26,7 +26,7 @@ import type {
 import { sendViaCfEmail, CfEmailError } from "../lib/cfemail";
 import {
   getThread,
-  getMailboxByAddress,
+  getMailboxesForUser,
   insertOutboundMessage,
   insertSendLog,
   insertAudit,
@@ -52,6 +52,7 @@ interface ValidatedBody {
   text: string | null;
   html: string | null;
   threadId: string | null;
+  mailboxId: string | null;
 }
 
 /** Parse + validate the POST body. Returns an error string when invalid. */
@@ -82,6 +83,10 @@ function validate(raw: unknown): ValidatedBody | { error: string } {
     threadId:
       typeof b.threadId === "string" && b.threadId.length > 0
         ? b.threadId
+        : null,
+    mailboxId:
+      typeof b.mailboxId === "string" && b.mailboxId.length > 0
+        ? b.mailboxId
         : null,
   };
 }
@@ -265,17 +270,6 @@ export function sendRoutes(): Hono<AccessEnv> {
   app.post("/send", async (c) => {
     const user = c.get("user");
 
-    // Resolve the caller's mailbox; `from` is forced to this address.
-    let mailbox: Mailbox | null;
-    try {
-      mailbox = await getMailboxByAddress(c.env, user.email);
-    } catch {
-      return c.json({ error: "Unable to resolve your mailbox." }, 500);
-    }
-    if (!mailbox) {
-      return c.json({ error: "No mailbox is provisioned for this account." }, 403);
-    }
-
     let raw: unknown;
     try {
       raw = await c.req.json();
@@ -286,6 +280,33 @@ export function sendRoutes(): Hono<AccessEnv> {
     const validated = validate(raw);
     if ("error" in validated) {
       return c.json({ error: validated.error }, 400);
+    }
+
+    // Resolve the caller's owned mailbox; `from` is forced to this address.
+    let owned: Mailbox[];
+    try {
+      owned = await getMailboxesForUser(c.env, user.email);
+    } catch {
+      return c.json({ error: "Unable to resolve your mailbox." }, 500);
+    }
+    if (owned.length === 0) {
+      return c.json({ error: "No mailbox is provisioned for this account." }, 403);
+    }
+
+    let mailbox: Mailbox;
+    if (validated.mailboxId) {
+      const found = owned.find((m) => m.id === validated.mailboxId);
+      if (!found) {
+        return c.json({ error: "You do not own that mailbox." }, 403);
+      }
+      mailbox = found;
+    } else if (owned.length === 1) {
+      mailbox = owned[0]!;
+    } else {
+      return c.json(
+        { error: "mailboxId is required when you own multiple mailboxes." },
+        400,
+      );
     }
 
     // Idempotency (optional): replay a prior result for the same client key so a

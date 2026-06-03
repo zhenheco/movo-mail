@@ -125,12 +125,16 @@ function AddMailboxForm({ onAdded }: { onAdded: () => void }) {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium">Owner email</span>
+          <span className="text-xs font-medium">Owner login email</span>
+          <span className="text-xs text-muted-foreground">
+            The email they sign in to Cloudflare Access with (their Google/Gmail)
+            — not the @movo.com.my address.
+          </span>
           <Input
             value={ownerEmail}
             onChange={(e) => setOwnerEmail(e.target.value)}
-            placeholder="owner@movo.com.my"
-            aria-label="Owner email"
+            placeholder="owner@gmail.com"
+            aria-label="Owner login email"
             autoComplete="off"
             disabled={submitting}
           />

@@ -77,6 +77,13 @@ export default {
     }
 
     // Forward path — preserve catch-all behavior; never drop non-managed mail.
+    if (!env.FALLBACK_FORWARD) {
+      console.error(
+        `[email] FALLBACK_FORWARD unset — refusing to drop non-managed mail for ${message.to}`,
+      );
+      message.setReject("temporary configuration error");
+      return;
+    }
     try {
       await message.forward(env.FALLBACK_FORWARD);
     } catch (err) {

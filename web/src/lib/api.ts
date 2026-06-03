@@ -208,12 +208,15 @@ export async function searchMessages(
 }
 
 /** POST /api/send */
-export async function sendMessage(body: SendRequest): Promise<SendResult> {
-  const data = await request<{ result: SendResult }>(`/send`, {
+export async function sendMessage(
+  body: SendRequest,
+  idempotencyKey: string,
+): Promise<SendResult> {
+  return await request<SendResult>(`/send`, {
     method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
-  return data.result;
 }
 
 /** POST /api/ai/draft — returns a draft only; the UI never auto-sends. */
@@ -273,12 +276,11 @@ export async function fetchAdminMailboxes(): Promise<AdminMailbox[]> {
  */
 export async function createAdminMailbox(
   body: CreateAdminMailboxBody,
-): Promise<AdminMailbox> {
-  const data = await request<{ mailbox: AdminMailbox }>(`/admin/mailboxes`, {
+): Promise<{ id: string }> {
+  return await request<{ id: string }>(`/admin/mailboxes`, {
     method: "POST",
     body: JSON.stringify(body),
   });
-  return data.mailbox;
 }
 
 /**

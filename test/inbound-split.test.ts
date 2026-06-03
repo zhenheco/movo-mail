@@ -39,7 +39,11 @@ import { handleInbound } from "../src/email/inbound";
 const FALLBACK = "acejou27@example.com";
 
 /** A fake ForwardableEmailMessage with the surface email() touches. */
-function fakeMessage(to: string, forward = vi.fn().mockResolvedValue(undefined)) {
+function fakeMessage(
+  to: string,
+  forward = vi.fn().mockResolvedValue(undefined),
+  setReject = vi.fn(),
+) {
   return {
     to,
     from: "sender@example.com",
@@ -47,7 +51,7 @@ function fakeMessage(to: string, forward = vi.fn().mockResolvedValue(undefined))
     rawSize: 0,
     headers: new Headers(),
     forward,
-    setReject: vi.fn(),
+    setReject,
     reply: vi.fn(),
   } as unknown as ForwardableEmailMessage;
 }
@@ -129,6 +133,21 @@ describe("email() inbound split", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     // A forward rejection must NOT fall through into the storage path.
+    expect(handleInbound).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-managed mail when FALLBACK_FORWARD is unset instead of dropping it", async () => {
+    vi.mocked(isManagedAddress).mockResolvedValue(false);
+    const forward = vi.fn().mockResolvedValue(undefined);
+    const setReject = vi.fn();
+    const message = fakeMessage("stranger@movo.com.my", forward, setReject);
+    const { ctx, settle } = fakeCtx();
+
+    await worker.email!(message, {} as Env, ctx);
+    await settle();
+
+    expect(setReject).toHaveBeenCalledWith("temporary configuration error");
+    expect(forward).not.toHaveBeenCalled();
     expect(handleInbound).not.toHaveBeenCalled();
   });
 });
