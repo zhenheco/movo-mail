@@ -21,4 +21,12 @@ describe("MailboxSwitcher", () => {
     // The active mailbox is the selected option.
     expect(html).toMatch(/<option[^>]*value="mb-2"[^>]*selected/);
   });
+
+  it("offers a unified 'All mailboxes' option", () => {
+    const html = renderToStaticMarkup(
+      <MailboxSwitcher mailboxes={boxes} activeId="__all__" onSwitch={() => undefined} />,
+    );
+    expect(html).toContain("All mailboxes");
+    expect(html).toMatch(/<option[^>]*value="__all__"[^>]*selected/);
+  });
 });

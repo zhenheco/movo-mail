@@ -12,11 +12,12 @@
  */
 
 import type { MailboxSummary } from "../lib/api";
+import { ALL_MAILBOXES } from "../lib/mailbox";
 
 export interface MailboxSwitcherProps {
   /** The caller's owned mailboxes (the switch options). */
   mailboxes: MailboxSummary[];
-  /** Currently active mailbox id. */
+  /** Currently active mailbox id (or the ALL_MAILBOXES sentinel). */
   activeId: string;
   /** Switch the active mailbox. */
   onSwitch: (id: string) => void;
@@ -43,6 +44,7 @@ export function MailboxSwitcher({
         aria-label="Active mailbox"
         className="w-full truncate rounded-md border border-border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary"
       >
+        <option value={ALL_MAILBOXES}>All mailboxes</option>
         {mailboxes.map((mailbox) => (
           <option key={mailbox.id} value={mailbox.id}>
             {optionLabel(mailbox)}

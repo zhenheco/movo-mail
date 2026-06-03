@@ -19,6 +19,7 @@ import type { MessageWithAttachments } from "../src/db";
 // ── Mock the db contract ──────────────────────────────────────────────────
 vi.mock("../src/db", () => ({
   getThreads: vi.fn(),
+  getThreadsForOwner: vi.fn(),
   getMessage: vi.fn(),
   searchMessages: vi.fn(),
   getMailboxesForUser: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("../src/db", () => ({
 
 import {
   getThreads,
+  getThreadsForOwner,
   getMessage,
   searchMessages,
   getMailboxesForUser,
@@ -33,6 +35,7 @@ import {
 import { readRoutes } from "../src/api/routes";
 
 const mGetThreads = vi.mocked(getThreads);
+const mGetThreadsForOwner = vi.mocked(getThreadsForOwner);
 const mGetMessage = vi.mocked(getMessage);
 const mSearchMessages = vi.mocked(searchMessages);
 const mGetMailboxesForUser = vi.mocked(getMailboxesForUser);
@@ -155,6 +158,33 @@ describe("GET /threads", () => {
   it("500 when db throws", async () => {
     mGetThreads.mockRejectedValue(new Error("db down"));
     const res = await dispatch("/threads?mailbox=mb-alice");
+    expect(res.status).toBe(500);
+  });
+});
+
+// ── GET /threads/all (unified inbox) ──────────────────────────────────────
+describe("GET /threads/all", () => {
+  it("returns merged threads across owned mailboxes (no mailbox param needed)", async () => {
+    mGetThreadsForOwner.mockResolvedValue([
+      makeThread({ id: "th-1", mailbox_id: "mb-alice" }),
+      makeThread({ id: "th-2", mailbox_id: "mb-team" }),
+    ]);
+    const res = await dispatch("/threads/all");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { threads: Thread[] };
+    expect(body.threads.map((t) => t.id)).toEqual(["th-1", "th-2"]);
+    // Scoped by the verified email, not a client-supplied mailbox.
+    expect(mGetThreadsForOwner).toHaveBeenCalledWith(
+      expect.anything(),
+      USER.email,
+    );
+    // The per-mailbox path must NOT be used for the unified view.
+    expect(mGetThreads).not.toHaveBeenCalled();
+  });
+
+  it("500 when db throws", async () => {
+    mGetThreadsForOwner.mockRejectedValue(new Error("db down"));
+    const res = await dispatch("/threads/all");
     expect(res.status).toBe(500);
   });
 });

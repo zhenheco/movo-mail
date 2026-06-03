@@ -14,7 +14,7 @@ import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ComposeDraft } from "../lib/compose";
 import { buildSendRequest } from "../lib/compose";
-import { aiDraft, sendMessage } from "../lib/api";
+import { aiDraft, sendMessage, type MailboxSummary } from "../lib/api";
 import { isLikelyEmail, parseRecipientInput } from "../lib/format";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -22,10 +22,12 @@ import { Textarea } from "./ui/textarea";
 import { Spinner } from "./ui/feedback";
 
 export interface ComposeProps {
-  /** The mailbox we send from (also the From address). */
+  /** Fallback From address (used only if the selected mailbox can't resolve). */
   fromAddress: string;
   /** Pre-filled draft (reply or blank new message). */
   initial: ComposeDraft;
+  /** The caller's owned mailboxes — the From options (drives which mailbox sends). */
+  fromOptions: MailboxSummary[];
   onClose: () => void;
   /** Notify parent on a successful send so it can refresh / collapse. */
   onSent: (providerId: string) => void;
@@ -33,11 +35,27 @@ export interface ComposeProps {
 
 type SendPhase = "idle" | "sending" | "error" | "sent";
 
-export function Compose({ fromAddress, initial, onClose, onSent }: ComposeProps) {
+export function Compose({
+  fromAddress,
+  initial,
+  fromOptions,
+  onClose,
+  onSent,
+}: ComposeProps) {
   const idempotencyKeyRef = useRef(crypto.randomUUID());
   const [to, setTo] = useState(initial.to);
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
+  // Which owned mailbox sends. A reply is locked to the thread's mailbox
+  // (initial.mailboxId); a new message defaults to it, else the first owned.
+  const [fromId, setFromId] = useState(
+    initial.mailboxId ?? fromOptions[0]?.id ?? "",
+  );
+  const fromBox = fromOptions.find((b) => b.id === fromId);
+  const effectiveFromAddress = fromBox?.address ?? fromAddress;
+  const isReply = Boolean(initial.threadId);
+  // A new message may pick its sender when the caller owns more than one box.
+  const canPickFrom = !isReply && fromOptions.length > 1;
 
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -89,12 +107,14 @@ export function Compose({ fromAddress, initial, onClose, onSent }: ComposeProps)
     setSendError(null);
     try {
       const payload = buildSendRequest({
-        fromAddress,
+        fromAddress: effectiveFromAddress,
         to: recipients,
         subject,
         text: body,
         threadId: initial.threadId,
-        mailboxId: initial.mailboxId,
+        // Send from the selected mailbox; the server re-derives the From address
+        // from this id (a reply stays locked to its thread's mailbox).
+        mailboxId: fromId || initial.mailboxId,
         inReplyTo: initial.inReplyTo,
         references: initial.references,
       });
@@ -129,6 +149,28 @@ export function Compose({ fromAddress, initial, onClose, onSent }: ComposeProps)
             Close
           </Button>
         </div>
+
+        {canPickFrom ? (
+          <label className="flex items-center gap-2 text-xs">
+            <span className="font-medium text-muted-foreground">From</span>
+            <select
+              value={fromId}
+              onChange={(e) => setFromId(e.target.value)}
+              aria-label="Send from mailbox"
+              className="flex-1 truncate rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
+            >
+              {fromOptions.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.displayName ? `${b.displayName} <${b.address}>` : b.address}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            From <span className="font-medium">{effectiveFromAddress}</span>
+          </p>
+        )}
 
         <label className="sr-only" htmlFor="compose-to">
           Recipients

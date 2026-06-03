@@ -202,6 +202,38 @@ export async function getThreads(
   });
 }
 
+/**
+ * List threads across EVERY mailbox the user owns, newest activity first —
+ * the unified ("All mailboxes") inbox. One query joins threads → mailboxes →
+ * users so it stays scoped to ownership (a user can never see another's
+ * threads), mirroring getThreads' last_message_id subquery so each row carries
+ * a real message id for the reading pane. Each thread keeps its `mailbox_id`,
+ * which the UI maps to a source-mailbox label.
+ */
+export async function getThreadsForOwner(
+  env: Env,
+  userEmail: string,
+): Promise<Thread[]> {
+  return guard("getThreadsForOwner", async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
+              t.message_count, t.unread, t.created_at, t.updated_at,
+              (SELECT m.id FROM messages m
+                 WHERE m.thread_id = t.id
+                 ORDER BY m.date DESC, m.rowid DESC
+                 LIMIT 1) AS last_message_id
+         FROM threads t
+         JOIN mailboxes mb ON mb.id = t.mailbox_id
+         JOIN users u ON u.id = mb.owner_id
+        WHERE u.email = ?
+        ORDER BY t.last_message_at DESC`,
+    )
+      .bind(normalizeEmail(userEmail))
+      .all<Thread>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
 /** Load a single thread with all its messages + attachments. */
 export async function getThread(
   env: Env,

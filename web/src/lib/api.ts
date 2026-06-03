@@ -186,6 +186,16 @@ export async function fetchThreads(mailboxId: string): Promise<Thread[]> {
   return data.threads;
 }
 
+/**
+ * GET /api/threads/all — the unified inbox: threads across every mailbox the
+ * caller owns (server-scoped to ownership). Each thread keeps its mailbox_id so
+ * the UI can label its source mailbox.
+ */
+export async function fetchAllThreads(): Promise<Thread[]> {
+  const data = await request<{ threads: Thread[] }>(`/threads/all`);
+  return data.threads;
+}
+
 /** GET /api/message/:id (html_body is sanitized client-side before render). */
 export async function fetchMessage(
   id: string,

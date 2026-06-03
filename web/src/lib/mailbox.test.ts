@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveActiveMailboxId } from "./mailbox";
+import { resolveActiveMailboxId, ALL_MAILBOXES } from "./mailbox";
 
 describe("resolveActiveMailboxId", () => {
   const owned = ["mb-1", "mb-2", "mb-3"];
@@ -26,5 +26,16 @@ describe("resolveActiveMailboxId", () => {
 
   it("defaults to the first owned mailbox when neither override nor stored apply", () => {
     expect(resolveActiveMailboxId(owned, null, null)).toBe("mb-1");
+  });
+
+  it("honors the ALL sentinel (override or stored) when more than one is owned", () => {
+    expect(resolveActiveMailboxId(owned, ALL_MAILBOXES, null)).toBe(ALL_MAILBOXES);
+    expect(resolveActiveMailboxId(owned, null, ALL_MAILBOXES)).toBe(ALL_MAILBOXES);
+  });
+
+  it("ignores the ALL sentinel when only one mailbox is owned", () => {
+    expect(resolveActiveMailboxId(["mb-1"], ALL_MAILBOXES, ALL_MAILBOXES)).toBe(
+      "mb-1",
+    );
   });
 });

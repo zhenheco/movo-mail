@@ -40,6 +40,7 @@ import {
   getAuditLog,
   getMailboxByAddress,
   getMailboxesForUser,
+  getThreadsForOwner,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
@@ -255,6 +256,63 @@ describe("db (real SQL via node:sqlite)", () => {
     });
   });
 
+  describe("getThreadsForOwner (unified inbox)", () => {
+    it("merges threads across every owned mailbox, newest first, scoped to the owner", async () => {
+      await seedUser(env, "u-alice", "alice@gmail.com");
+      await seedUser(env, "u-bob", "bob@gmail.com");
+      await seedMailbox(env, "mb-a1", "sales@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-a2", "ops@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-b1", "ceo@movo.com.my", "u-bob");
+
+      // One thread in each of Alice's two mailboxes (support is newer) + one in
+      // Bob's mailbox that must never appear for Alice.
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "sales@movo.com.my",
+          messageId: "<a1@x>",
+          subject: "Sales lead",
+          date: 1_700_000_000_000,
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "ops@movo.com.my",
+          messageId: "<a2@x>",
+          subject: "Support ticket",
+          date: 1_700_000_500_000,
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "ceo@movo.com.my",
+          messageId: "<b1@x>",
+          subject: "Bob private",
+          date: 1_700_000_900_000,
+        }),
+      );
+
+      const threads = await getThreadsForOwner(env, "alice@gmail.com");
+      expect(threads).toHaveLength(2);
+      // Newest activity first (support before sales); Bob's thread excluded.
+      expect(threads.map((t) => t.subject)).toEqual([
+        "Support ticket",
+        "Sales lead",
+      ]);
+      expect(threads.map((t) => t.mailbox_id).sort()).toEqual(["mb-a1", "mb-a2"]);
+      // Each row carries a real last_message_id for the reading pane.
+      expect(threads.every((t) => typeof t.last_message_id === "string")).toBe(
+        true,
+      );
+    });
+
+    it("returns [] for a user that owns no mailboxes (injection-safe)", async () => {
+      expect(await getThreadsForOwner(env, "ghost' OR '1'='1")).toHaveLength(0);
+    });
+  });
+
   describe("insertInboundMessage + getThreads", () => {
     it("creates a thread and a message, marked unread", async () => {
       const id = await insertInboundMessage(env, makeInbound());
@@ -449,12 +507,12 @@ describe("db (real SQL via node:sqlite)", () => {
       const id = await insertInboundMessage(
         env,
         makeInbound({
-          to: [addr("support@movo.com.my"), addr("ops@movo.com.my")],
+          to: [addr("support@movo.com.my"), addr("support@movo.com.my")],
         }),
       );
       const msg = await getMessage(env, id);
       expect(msg?.to_addresses).toBe(
-        JSON.stringify(["support@movo.com.my", "ops@movo.com.my"]),
+        JSON.stringify(["support@movo.com.my", "support@movo.com.my"]),
       );
     });
   });

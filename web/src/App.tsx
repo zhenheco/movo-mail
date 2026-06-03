@@ -22,6 +22,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageWithAttachments, Thread } from "./lib/types";
 import {
+  ALL_MAILBOXES,
   resolveActiveMailboxId,
   resolveFromAddress,
   resolveMailboxId,
@@ -172,10 +173,17 @@ export default function App() {
   }
 
   const { boxes, activeId } = mailboxState;
+  const isAll = activeId === ALL_MAILBOXES;
   const activeBox = boxes.find((b) => b.id === activeId);
+  // mailboxId scopes the inbox (the ALL sentinel triggers the unified view in
+  // ThreadList). For a NEW message we need a real mailbox to send from, so the
+  // unified view defaults composing to the first owned mailbox (Compose still
+  // lets the user pick another).
   const mailboxId = activeId;
+  const composeMailboxId = isAll ? boxes[0]?.id ?? "" : activeId;
   const fromAddress =
     activeBox?.address ||
+    boxes[0]?.address ||
     resolveFromAddress(
       import.meta.env as unknown as Record<string, string | undefined>,
       activeId,
@@ -207,7 +215,7 @@ export default function App() {
   }
 
   function handleCompose() {
-    setCompose(blankDraft(mailboxId));
+    setCompose(blankDraft(composeMailboxId));
   }
 
   function handleSent() {
@@ -254,6 +262,7 @@ export default function App() {
           <Compose
             fromAddress={fromAddress}
             initial={compose}
+            fromOptions={boxes}
             onClose={() => setCompose(null)}
             onSent={handleSent}
           />

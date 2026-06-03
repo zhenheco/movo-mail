@@ -7,7 +7,13 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { Message, Thread } from "../lib/types";
-import { fetchThreads, searchMessages, type MailboxSummary } from "../lib/api";
+import {
+  fetchThreads,
+  fetchAllThreads,
+  searchMessages,
+  type MailboxSummary,
+} from "../lib/api";
+import { ALL_MAILBOXES } from "../lib/mailbox";
 import { useAsync } from "../lib/useAsync";
 import { formatDate } from "../lib/format";
 import { cn } from "../lib/cn";
@@ -47,14 +53,27 @@ export function ThreadList({
   const [searchTerm, setSearchTerm] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
 
+  // Unified inbox: merge threads across every owned mailbox, and label each row
+  // with its source mailbox. Search broadens to all owned mailboxes too.
+  const isAll = mailboxId === ALL_MAILBOXES;
+
+  const addressById = useMemo(
+    () =>
+      Object.fromEntries((mailboxes ?? []).map((m) => [m.id, m.address])) as Record<
+        string,
+        string
+      >,
+    [mailboxes],
+  );
+
   const threadsState = useAsync<Thread[]>(
-    () => fetchThreads(mailboxId),
+    () => (isAll ? fetchAllThreads() : fetchThreads(mailboxId)),
     [mailboxId],
     { enabled: activeQuery.trim() === "" },
   );
 
   const searchState = useAsync<Message[]>(
-    () => searchMessages(activeQuery, mailboxId),
+    () => searchMessages(activeQuery, isAll ? undefined : mailboxId),
     [mailboxId, activeQuery],
     { enabled: activeQuery.trim() !== "" },
   );
@@ -150,6 +169,8 @@ export function ThreadList({
             state={threadsState}
             selectedThreadId={selectedThreadId}
             onSelectThread={onSelectThread}
+            showSource={isAll}
+            addressById={addressById}
           />
         )}
       </div>
@@ -161,10 +182,15 @@ function ThreadRows({
   state,
   selectedThreadId,
   onSelectThread,
+  showSource,
+  addressById,
 }: {
   state: ReturnType<typeof useAsync<Thread[]>>;
   selectedThreadId: string | null;
   onSelectThread: (thread: Thread) => void;
+  /** Unified inbox: show each thread's source-mailbox chip. */
+  showSource: boolean;
+  addressById: Record<string, string>;
 }) {
   if (state.loading) {
     return <LoadingState label="Loading inbox…" />;
@@ -184,6 +210,11 @@ function ThreadRows({
             thread={thread}
             selected={thread.id === selectedThreadId}
             onSelect={() => onSelectThread(thread)}
+            sourceAddress={
+              showSource
+                ? addressById[thread.mailbox_id] ?? null
+                : null
+            }
           />
         </li>
       ))}
@@ -195,10 +226,13 @@ function ThreadRow({
   thread,
   selected,
   onSelect,
+  sourceAddress,
 }: {
   thread: Thread;
   selected: boolean;
   onSelect: () => void;
+  /** Source-mailbox address chip (unified inbox); null hides it. */
+  sourceAddress: string | null;
 }) {
   const unread = thread.unread === 1;
   return (
@@ -223,6 +257,11 @@ function ThreadRow({
           {formatDate(thread.last_message_at)}
         </span>
       </div>
+      {sourceAddress ? (
+        <span className="w-fit max-w-full truncate rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {sourceAddress}
+        </span>
+      ) : null}
       <div className="flex items-center gap-2">
         {unread ? (
           <span
