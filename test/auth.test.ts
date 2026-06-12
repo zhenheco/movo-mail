@@ -67,6 +67,7 @@ function mailbox(address: string): Mailbox {
     address,
     display_name: "Test",
     owner_id: "usr_1",
+    kind: "personal",
     created_at: 0,
     updated_at: 0,
   };

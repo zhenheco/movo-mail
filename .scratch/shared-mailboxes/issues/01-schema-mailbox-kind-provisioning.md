@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: closed
 Type: feat
 
 # 01 — Schema + 信箱分型 + 供裝

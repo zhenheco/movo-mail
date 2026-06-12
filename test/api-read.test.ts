@@ -51,6 +51,7 @@ const OWNED_MAILBOX: Mailbox = {
   address: "alice@movo.com.my",
   display_name: "Alice",
   owner_id: "user-alice",
+  kind: "personal",
   created_at: 1,
   updated_at: 1,
 };

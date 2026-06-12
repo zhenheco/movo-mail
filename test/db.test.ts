@@ -117,10 +117,14 @@ function makeD1(db: SqliteDatabase): D1Database {
 
 function migrationSql(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  const sql = readFileSync(
-    join(here, "..", "migrations", "0001_init.sql"),
-    "utf8",
-  );
+  const sql = [
+    "0001_init.sql",
+    "0002_user_role.sql",
+    "0003_mailboxes_address_unique.sql",
+    "0004_shared_mailboxes.sql",
+  ]
+    .map((name) => readFileSync(join(here, "..", "migrations", name), "utf8"))
+    .join("\n");
   // `references` is a reserved word. D1's SQLite build accepts it bare in a
   // column definition, but the stricter `node:sqlite` build requires it quoted.
   // Quote only the DDL declaration; every runtime query already uses the quoted

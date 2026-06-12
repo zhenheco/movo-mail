@@ -21,6 +21,7 @@ import type {
   AuditRow,
   Mailbox,
   AdminMailbox,
+  MailboxKind,
   User,
   UserRole,
   ParsedInbound,
@@ -44,6 +45,7 @@ export interface CreateMailboxInput {
   /** Owner's email; upserted to a user row. null = unowned mailbox. */
   ownerEmail: string | null;
   displayName: string | null;
+  kind?: MailboxKind;
 }
 
 /** A message together with its attachments (for the thread/message views). */
@@ -389,7 +391,7 @@ export async function getMailboxByAddress(
 ): Promise<Mailbox | null> {
   return guard("getMailboxByAddress", async () => {
     const row = await env.DB.prepare(
-      `SELECT id, address, display_name, owner_id, created_at, updated_at
+      `SELECT id, address, display_name, owner_id, kind, created_at, updated_at
          FROM mailboxes
         WHERE address = ?`,
     )
@@ -413,11 +415,12 @@ export async function getMailboxesForUser(
 ): Promise<Mailbox[]> {
   return guard("getMailboxesForUser", async () => {
     const { results } = await env.DB.prepare(
-      `SELECT m.id, m.address, m.display_name, m.owner_id, m.created_at,
+      `SELECT m.id, m.address, m.display_name, m.owner_id, m.kind, m.created_at,
               m.updated_at
          FROM mailboxes m
          JOIN users u ON u.id = m.owner_id
         WHERE u.email = ?
+          AND m.kind = 'personal'
         ORDER BY m.address ASC`,
     )
       .bind(normalizeEmail(userEmail))
@@ -469,7 +472,8 @@ export async function listAllMailboxes(env: Env): Promise<AdminMailbox[]> {
       `SELECT m.id          AS id,
               m.address      AS address,
               m.display_name AS displayName,
-              u.email        AS ownerEmail
+              u.email        AS ownerEmail,
+              m.kind         AS kind
          FROM mailboxes m
          LEFT JOIN users u ON u.id = m.owner_id
         ORDER BY m.address ASC`,
@@ -896,6 +900,7 @@ export async function createMailbox(
     // existence check below case-insensitive (e.g. `Sales@` collides with an
     // existing `sales@`) and closes the case-variant duplicate-row hijack.
     const address = normalizeAddress(input.address);
+    const kind = input.kind ?? "personal";
     const existing = await getMailboxByAddress(env, address);
     if (existing) {
       throw new MailboxExistsError(address);
@@ -910,10 +915,10 @@ export async function createMailbox(
     try {
       await env.DB.prepare(
         `INSERT INTO mailboxes
-           (id, address, display_name, owner_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, address, display_name, owner_id, kind, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-        .bind(id, address, input.displayName, ownerId, now, now)
+        .bind(id, address, input.displayName, ownerId, kind, now, now)
         .run();
     } catch (cause) {
       // Lost a race on the UNIQUE(address) between the check above and insert.

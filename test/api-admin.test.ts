@@ -67,6 +67,7 @@ function makeAdminMailbox(over: Partial<AdminMailbox> = {}): AdminMailbox {
     address: "ops@movo.com.my",
     displayName: "Ops",
     ownerEmail: "ops@movo.com.my",
+    kind: "personal",
     ...over,
   };
 }
@@ -229,7 +230,34 @@ describe("POST /admin/mailboxes (admin)", () => {
       address: "new@movo.com.my",
       ownerEmail: "owner@movo.com.my",
       displayName: "New Box",
+      kind: "personal",
     });
+  });
+
+  it("201 for a shared mailbox without an owner", async () => {
+    mCreateMailbox.mockResolvedValue({ id: "mb-shared" });
+    const res = await dispatch(ADMIN, "/admin/mailboxes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: "shared@movo.com.my",
+        kind: "shared",
+        displayName: "Shared",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      id: string;
+      welcomeEmailSent: boolean;
+    };
+    expect(body).toEqual({ id: "mb-shared", welcomeEmailSent: false });
+    expect(mCreateMailbox).toHaveBeenCalledWith(expect.anything(), {
+      address: "shared@movo.com.my",
+      ownerEmail: null,
+      displayName: "Shared",
+      kind: "shared",
+    });
+    expect(mSendWelcome).not.toHaveBeenCalled();
   });
 
   it("sends a welcome email to the owner and reports welcomeEmailSent: true", async () => {
@@ -308,6 +336,31 @@ describe("POST /admin/mailboxes (admin)", () => {
       body: JSON.stringify({
         address: "ok@movo.com.my",
         ownerEmail: "nope",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(mCreateMailbox).not.toHaveBeenCalled();
+  });
+
+  it("400 when kind defaults to personal and ownerEmail is missing", async () => {
+    const res = await dispatch(ADMIN, "/admin/mailboxes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: "ok@movo.com.my",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(mCreateMailbox).not.toHaveBeenCalled();
+  });
+
+  it("400 when kind is personal and ownerEmail is missing", async () => {
+    const res = await dispatch(ADMIN, "/admin/mailboxes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: "ok@movo.com.my",
+        kind: "personal",
       }),
     });
     expect(res.status).toBe(400);

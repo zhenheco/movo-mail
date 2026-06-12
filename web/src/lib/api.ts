@@ -163,10 +163,13 @@ async function requestNoContent(
 }
 
 /** A mailbox the caller owns, as returned by GET /api/mailboxes. */
+export type MailboxKind = "personal" | "shared";
+
 export interface MailboxSummary {
   id: string;
   address: string;
   displayName: string | null;
+  kind: MailboxKind;
 }
 
 /**
@@ -264,13 +267,15 @@ export interface AdminMailbox {
   address: string;
   displayName: string | null;
   ownerEmail: string | null;
+  kind: MailboxKind;
 }
 
 /** Body for creating a mailbox from the admin panel. */
 export interface CreateAdminMailboxBody {
   address: string;
-  ownerEmail: string;
+  ownerEmail?: string;
   displayName?: string;
+  kind?: MailboxKind;
 }
 
 /** GET /api/admin/mailboxes — every managed mailbox (admin only). */

@@ -82,6 +82,9 @@ export interface AccessUser {
 /** Coarse authorization role (mirrors users.role; see 0002_user_role.sql). */
 export type UserRole = "admin" | "user";
 
+/** Mailbox delivery model. */
+export type MailboxKind = "personal" | "shared";
+
 export interface User {
   id: string;
   email: string;
@@ -97,6 +100,7 @@ export interface Mailbox {
   address: string;
   display_name: string | null;
   owner_id: string | null;
+  kind: MailboxKind;
   created_at: EpochMs;
   updated_at: EpochMs;
 }
@@ -112,6 +116,7 @@ export interface AdminMailbox {
   address: string;
   displayName: string | null;
   ownerEmail: string | null;
+  kind: MailboxKind;
 }
 
 export interface Thread {

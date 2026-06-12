@@ -32,6 +32,7 @@ const RESET_SQL: readonly string[] = [
     address TEXT NOT NULL UNIQUE,
     display_name TEXT,
     owner_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'personal',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -40,6 +41,7 @@ const RESET_SQL: readonly string[] = [
     mailbox_id TEXT NOT NULL,
     subject TEXT,
     snippet TEXT,
+    assignee_id TEXT,
     last_message_at INTEGER NOT NULL,
     message_count INTEGER NOT NULL DEFAULT 0,
     unread INTEGER NOT NULL DEFAULT 0,

@@ -1,0 +1,2 @@
+ALTER TABLE mailboxes ADD COLUMN kind TEXT NOT NULL DEFAULT 'personal';
+ALTER TABLE threads ADD COLUMN assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL;

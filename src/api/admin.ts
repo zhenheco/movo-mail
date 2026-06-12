@@ -34,6 +34,7 @@ import {
   type CreateMailboxInput,
 } from "../db";
 import { sendWelcomeEmail } from "../lib/welcome";
+import type { MailboxKind } from "../types";
 
 /**
  * Allowed mailbox address shape: a local part with no whitespace/@, on the
@@ -49,6 +50,17 @@ interface CreateMailboxBody {
   address?: unknown;
   ownerEmail?: unknown;
   displayName?: unknown;
+  kind?: unknown;
+}
+
+function parseMailboxKind(value: unknown): MailboxKind | null {
+  if (value === undefined || value === "personal") {
+    return "personal";
+  }
+  if (value === "shared") {
+    return "shared";
+  }
+  return null;
 }
 
 /** Build the /admin sub-router (with its authorization guard pre-mounted). */
@@ -97,6 +109,7 @@ export function adminRoutes(): Hono<AccessEnv> {
       typeof body.displayName === "string" && body.displayName.trim().length > 0
         ? body.displayName.trim()
         : null;
+    const kind = parseMailboxKind(body.kind);
 
     if (!MOVO_ADDRESS.test(address)) {
       return c.json(
@@ -104,11 +117,22 @@ export function adminRoutes(): Hono<AccessEnv> {
         400,
       );
     }
-    if (!EMAIL.test(ownerEmail)) {
+    if (kind === null) {
+      return c.json({ error: "kind must be 'personal' or 'shared'." }, 400);
+    }
+    if (kind === "personal" && !EMAIL.test(ownerEmail)) {
+      return c.json({ error: "A valid owner email is required." }, 400);
+    }
+    if (kind === "shared" && ownerEmail.length > 0 && !EMAIL.test(ownerEmail)) {
       return c.json({ error: "A valid owner email is required." }, 400);
     }
 
-    const input: CreateMailboxInput = { address, ownerEmail, displayName };
+    const input: CreateMailboxInput = {
+      address,
+      ownerEmail: ownerEmail || null,
+      displayName,
+      kind,
+    };
     let id: string;
     try {
       ({ id } = await createMailbox(c.env, input));
@@ -125,16 +149,18 @@ export function adminRoutes(): Hono<AccessEnv> {
     // origin of the admin's own request (the canonical Access-protected webmail
     // URL), so it needs no separate config.
     let welcomeEmailSent = false;
-    try {
-      await sendWelcomeEmail(c.env, {
-        address,
-        displayName,
-        ownerEmail,
-        loginUrl: new URL(c.req.url).origin,
-      });
-      welcomeEmailSent = true;
-    } catch (err) {
-      console.error("welcome email failed", err);
+    if (input.ownerEmail) {
+      try {
+        await sendWelcomeEmail(c.env, {
+          address,
+          displayName,
+          ownerEmail: input.ownerEmail,
+          loginUrl: new URL(c.req.url).origin,
+        });
+        welcomeEmailSent = true;
+      } catch (err) {
+        console.error("welcome email failed", err);
+      }
     }
 
     return c.json({ id, welcomeEmailSent }, 201);

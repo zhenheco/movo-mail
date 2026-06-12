@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 
 import {
   getUserByEmail,
+  getMailboxByAddress,
   getMailboxesForUser,
   upsertUserByEmail,
   getUserRole,
@@ -116,6 +117,7 @@ function makeEnv(): Env {
   db.exec(loadMigration("0001_init.sql"));
   db.exec(loadMigration("0002_user_role.sql"));
   db.exec(loadMigration("0003_mailboxes_address_unique.sql"));
+  db.exec(loadMigration("0004_shared_mailboxes.sql"));
   return { DB: makeD1(db) } as unknown as Env;
 }
 
@@ -131,6 +133,39 @@ describe("db admin (real SQL via node:sqlite, 0001+0002 applied)", () => {
 
   beforeEach(() => {
     env = makeEnv();
+  });
+
+  describe("migration 0004 shared mailboxes", () => {
+    it("adds mailbox kind and nullable thread assignee columns", async () => {
+      const mailboxColumns = await env.DB.prepare(
+        `PRAGMA table_info(mailboxes)`,
+      ).all<{ name: string; notnull: number; dflt_value: string | null }>();
+      const kind = mailboxColumns.results?.find((c) => c.name === "kind");
+      expect(kind).toMatchObject({
+        notnull: 1,
+        dflt_value: "'personal'",
+      });
+
+      const threadColumns = await env.DB.prepare(
+        `PRAGMA table_info(threads)`,
+      ).all<{ name: string; notnull: number }>();
+      const assignee = threadColumns.results?.find(
+        (c) => c.name === "assignee_id",
+      );
+      expect(assignee).toMatchObject({ notnull: 0 });
+
+      const threadFks = await env.DB.prepare(
+        `PRAGMA foreign_key_list(threads)`,
+      ).all<{ from: string; table: string; to: string; on_delete: string }>();
+      expect(threadFks.results).toContainEqual(
+        expect.objectContaining({
+          from: "assignee_id",
+          table: "users",
+          to: "id",
+          on_delete: "SET NULL",
+        }),
+      );
+    });
   });
 
   describe("upsertUserByEmail / getUserByEmail / getUserRole", () => {
@@ -255,6 +290,7 @@ describe("db admin (real SQL via node:sqlite, 0001+0002 applied)", () => {
         address: "noreply@movo.com.my",
         ownerEmail: null,
         displayName: "No Reply",
+        kind: "personal",
       });
       const all = await listAllMailboxes(env);
       const row = all.find((m) => m.id === id);
@@ -262,17 +298,62 @@ describe("db admin (real SQL via node:sqlite, 0001+0002 applied)", () => {
       expect(row?.displayName).toBe("No Reply");
     });
 
+    it("stores and reads mailbox kind for personal and shared mailboxes", async () => {
+      const ownerId = await upsertUserByEmail(env, "owner@movo.com.my", null);
+      const personal = await createMailbox(env, {
+        address: "personal@movo.com.my",
+        ownerEmail: "owner@movo.com.my",
+        displayName: "Personal",
+        kind: "personal",
+      });
+      const shared = await createMailbox(env, {
+        address: "shared@movo.com.my",
+        ownerEmail: null,
+        displayName: "Shared",
+        kind: "shared",
+      });
+
+      const personalRow = await getMailboxesForUser(env, "owner@movo.com.my");
+      expect(personalRow).toHaveLength(1);
+      expect(personalRow[0]).toMatchObject({
+        id: personal.id,
+        kind: "personal",
+        owner_id: ownerId,
+      });
+
+      const sharedRow = await env.DB.prepare(
+        `SELECT kind, owner_id FROM mailboxes WHERE id = ?`,
+      )
+        .bind(shared.id)
+        .first<{ kind: string; owner_id: string | null }>();
+      expect(sharedRow).toEqual({ kind: "shared", owner_id: null });
+
+      const sharedByAddress = await getMailboxByAddress(
+        env,
+        "shared@movo.com.my",
+      );
+      expect(sharedByAddress).toMatchObject({ id: shared.id, kind: "shared" });
+
+      const all = await listAllMailboxes(env);
+      expect(all.find((m) => m.id === shared.id)).toMatchObject({
+        ownerEmail: null,
+        kind: "shared",
+      });
+    });
+
     it("throws MailboxExistsError when the address already exists", async () => {
       await createMailbox(env, {
         address: "dup@movo.com.my",
         ownerEmail: null,
         displayName: null,
+        kind: "personal",
       });
       await expect(
         createMailbox(env, {
           address: "dup@movo.com.my",
           ownerEmail: null,
           displayName: null,
+          kind: "personal",
         }),
       ).rejects.toBeInstanceOf(MailboxExistsError);
     });

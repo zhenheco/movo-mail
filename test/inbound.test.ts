@@ -30,6 +30,7 @@ const SAMPLE_MAILBOX: Mailbox = {
   address: "support@movo.com.my",
   display_name: "Support",
   owner_id: null,
+  kind: "personal",
   created_at: 0,
   updated_at: 0,
 };

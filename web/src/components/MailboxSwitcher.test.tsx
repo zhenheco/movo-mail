@@ -4,8 +4,8 @@ import { MailboxSwitcher } from "./MailboxSwitcher";
 import type { MailboxSummary } from "../lib/api";
 
 const boxes: MailboxSummary[] = [
-  { id: "mb-1", address: "sales@movo.com.my", displayName: "Sales" },
-  { id: "mb-2", address: "priss@movo.com.my", displayName: null },
+  { id: "mb-1", address: "sales@movo.com.my", displayName: "Sales", kind: "personal" },
+  { id: "mb-2", address: "priss@movo.com.my", displayName: null, kind: "personal" },
 ];
 
 describe("MailboxSwitcher", () => {

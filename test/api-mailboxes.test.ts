@@ -38,6 +38,7 @@ function makeMailbox(over: Partial<Mailbox> = {}): Mailbox {
     address: "alice@movo.com.my",
     display_name: "Alice",
     owner_id: "user-alice",
+    kind: "personal",
     created_at: 1,
     updated_at: 1,
     ...over,
@@ -68,15 +69,25 @@ beforeEach(() => {
 });
 
 describe("GET /mailboxes", () => {
-  it("returns the caller's mailboxes mapped to { id, address, displayName }", async () => {
+  it("returns the caller's mailboxes mapped to { id, address, displayName, kind }", async () => {
     mGetMailboxesForUser.mockResolvedValue([makeMailbox()]);
     const res = await dispatch(ALICE);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      mailboxes: { id: string; address: string; displayName: string | null }[];
+      mailboxes: {
+        id: string;
+        address: string;
+        displayName: string | null;
+        kind: string;
+      }[];
     };
     expect(body.mailboxes).toEqual([
-      { id: "mb-alice", address: "alice@movo.com.my", displayName: "Alice" },
+      {
+        id: "mb-alice",
+        address: "alice@movo.com.my",
+        displayName: "Alice",
+        kind: "personal",
+      },
     ]);
     expect(mGetMailboxesForUser).toHaveBeenCalledWith(
       expect.anything(),

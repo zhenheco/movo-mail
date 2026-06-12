@@ -56,6 +56,7 @@ const MAILBOX: Mailbox = {
   address: "sales@movo.com.my",
   display_name: "Sales",
   owner_id: "usr_nelson",
+  kind: "personal",
   created_at: 0,
   updated_at: 0,
 };
