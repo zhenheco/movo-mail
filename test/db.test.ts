@@ -33,6 +33,7 @@ import {
   insertInboundMessage,
   insertOutboundMessage,
   upsertThread,
+  claimThread,
   insertSendLog,
   updateSendLogStatus,
   getSendLog,
@@ -413,6 +414,32 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(threads[0]?.snippet).toBe("Where is my order?");
     });
 
+    it("creates a new shared-mailbox inbound thread unassigned", async () => {
+      await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "hello@movo.com.my",
+          messageId: "<shared-new@example.com>",
+        }),
+      );
+
+      const threads = await getThreads(env, "mb-shared");
+      expect(threads).toHaveLength(1);
+      expect(threads[0]?.assignee_id).toBeNull();
+    });
+
+    it("keeps a new personal-mailbox inbound thread unassigned", async () => {
+      await insertInboundMessage(env, makeInbound());
+
+      const threads = await getThreads(env, "mb-1");
+      expect(threads).toHaveLength(1);
+      expect(threads[0]?.assignee_id).toBeNull();
+      expect(threads[0]?.message_count).toBe(1);
+      expect(threads[0]?.unread).toBe(1);
+    });
+
     it("rejects an unknown mailbox address", async () => {
       await expect(
         insertInboundMessage(
@@ -442,6 +469,39 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(threads[0]?.message_count).toBe(2);
       expect(threads[0]?.last_message_at).toBe(1_700_000_100_000);
       expect(threads[0]?.snippet).toBe("Following up");
+    });
+
+    it("leaves the assignee unchanged when an inbound reply matches an existing thread", async () => {
+      await seedUser(env, "u-owner", "owner@movo.com.my");
+      await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "hello@movo.com.my",
+          messageId: "<shared-root@example.com>",
+        }),
+      );
+      const threadId = (await getThreads(env, "mb-shared"))[0]!.id;
+      await env.DB.prepare(
+        `UPDATE threads SET assignee_id = ? WHERE id = ?`,
+      )
+        .bind("u-owner", threadId)
+        .run();
+
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "hello@movo.com.my",
+          messageId: "<shared-reply@example.com>",
+          inReplyTo: "<shared-root@example.com>",
+          references: ["<shared-root@example.com>"],
+          subject: "Re: Order question",
+        }),
+      );
+
+      const thread = await getThread(env, threadId);
+      expect(thread?.assignee_id).toBe("u-owner");
+      expect(thread?.message_count).toBe(2);
     });
 
     it("starts a new thread when no reply headers match", async () => {
@@ -724,6 +784,66 @@ describe("db (real SQL via node:sqlite)", () => {
       });
       expect(tid).toBe("11111111-1111-1111-1111-111111111111");
       expect(await getThread(env, tid)).not.toBeNull();
+    });
+  });
+
+  describe("claimThread", () => {
+    it("claims an unassigned thread for the given user", async () => {
+      await seedUser(env, "u-claimer", "claimer@movo.com.my");
+      const threadId = await upsertThread(env, {
+        mailboxId: "mb-1",
+        subject: "Needs owner",
+        snippet: "s",
+        lastMessageAt: 1_700_000_000_000,
+        unread: true,
+      });
+
+      const won = await claimThread(env, threadId, "u-claimer");
+
+      expect(won).toBe(true);
+      const thread = await getThread(env, threadId);
+      expect(thread?.assignee_id).toBe("u-claimer");
+    });
+
+    it("does not replace an existing assignee", async () => {
+      await seedUser(env, "u-first", "first@movo.com.my");
+      await seedUser(env, "u-second", "second@movo.com.my");
+      const threadId = await upsertThread(env, {
+        mailboxId: "mb-1",
+        subject: "Claimed",
+        snippet: "s",
+        lastMessageAt: 1_700_000_000_000,
+        unread: true,
+        assigneeId: "u-first",
+      });
+
+      const won = await claimThread(env, threadId, "u-second");
+
+      expect(won).toBe(false);
+      const thread = await getThread(env, threadId);
+      expect(thread?.assignee_id).toBe("u-first");
+    });
+
+    it("allows exactly one winner when two users claim the same thread", async () => {
+      await seedUser(env, "u-first", "first@movo.com.my");
+      await seedUser(env, "u-second", "second@movo.com.my");
+      const threadId = await upsertThread(env, {
+        mailboxId: "mb-1",
+        subject: "Race",
+        snippet: "s",
+        lastMessageAt: 1_700_000_000_000,
+        unread: true,
+      });
+
+      const [firstWon, secondWon] = await Promise.all([
+        claimThread(env, threadId, "u-first"),
+        claimThread(env, threadId, "u-second"),
+      ]);
+
+      expect([firstWon, secondWon].filter(Boolean)).toHaveLength(1);
+      const winner = firstWon ? "u-first" : "u-second";
+      const thread = await getThread(env, threadId);
+      expect(thread?.assignee_id).toBe(winner);
     });
   });
 

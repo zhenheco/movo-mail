@@ -651,6 +651,25 @@ export async function upsertThread(
   });
 }
 
+/** Atomically claim an unassigned thread. Returns true only for the winner. */
+export async function claimThread(
+  env: Env,
+  threadId: string,
+  userId: string,
+): Promise<boolean> {
+  return guard("claimThread", async () => {
+    const updated = await env.DB.prepare(
+      `UPDATE threads
+          SET assignee_id = ?
+        WHERE id = ?
+          AND assignee_id IS NULL`,
+    )
+      .bind(userId, threadId)
+      .run();
+    return (updated.meta?.changes ?? 0) > 0;
+  });
+}
+
 /**
  * Persist a fully-parsed inbound message: resolves the destination mailbox,
  * upserts the thread (grouping a reply into the prior conversation via

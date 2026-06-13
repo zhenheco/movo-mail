@@ -30,6 +30,7 @@ const getThread = vi.fn((..._args: unknown[]): unknown => null);
 const getMailboxesForUser = vi.fn((..._args: unknown[]): unknown => []);
 const getSendableMailboxes = vi.fn((..._args: unknown[]): unknown => []);
 const getUserByEmail = vi.fn((..._args: unknown[]): unknown => null);
+const claimThread = vi.fn(async (..._args: unknown[]): Promise<boolean> => false);
 const insertOutboundMessage = vi.fn(async (..._args: unknown[]): Promise<string> => "msg-row-1");
 const insertSendLog = vi.fn(async (..._args: unknown[]): Promise<string> => "send-log-1");
 const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit-1");
@@ -39,6 +40,7 @@ vi.mock("../src/db", () => ({
   getMailboxesForUser: (...a: unknown[]) => getMailboxesForUser(...a),
   getSendableMailboxes: (...a: unknown[]) => getSendableMailboxes(...a),
   getUserByEmail: (...a: unknown[]) => getUserByEmail(...a),
+  claimThread: (...a: unknown[]) => claimThread(...a),
   insertOutboundMessage: (...a: unknown[]) => insertOutboundMessage(...a),
   insertSendLog: (...a: unknown[]) => insertSendLog(...a),
   insertAudit: (...a: unknown[]) => insertAudit(...a),
@@ -201,6 +203,7 @@ beforeEach(() => {
   getMailboxesForUser.mockReset();
   getSendableMailboxes.mockReset();
   getUserByEmail.mockReset();
+  claimThread.mockReset();
   insertOutboundMessage.mockClear();
   insertSendLog.mockClear();
   insertAudit.mockClear();
@@ -218,6 +221,7 @@ beforeEach(() => {
     created_at: 0,
     updated_at: 0,
   });
+  claimThread.mockResolvedValue(false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,11 +511,46 @@ describe("POST /send", () => {
     expect(arg.assigneeId).toBeUndefined();
   });
 
-  it("does not assign or claim when replying to an existing shared-mailbox thread", async () => {
+  it("claims an unassigned shared-mailbox thread when replying", async () => {
     getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
     getThread.mockResolvedValue(
       threadWith("<orig-shared@example.com>", null, SHARED_MAILBOX.id),
     );
+    claimThread.mockResolvedValue(true);
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: shared",
+        text: "reply",
+        threadId: "thr_1",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getUserByEmail).toHaveBeenCalledWith(expect.anything(), USER.email);
+    expect(claimThread).toHaveBeenCalledWith(
+      expect.anything(),
+      "thr_1",
+      "db-user-nelson",
+    );
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
+      threadId?: string;
+      assigneeId?: string | null;
+    };
+    expect(arg.threadId).toBe("thr_1");
+    expect(arg.assigneeId).toBeUndefined();
+  });
+
+  it("does not claim an already-assigned shared-mailbox thread when replying", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    getThread.mockResolvedValue({
+      ...threadWith("<orig-shared@example.com>", null, SHARED_MAILBOX.id),
+      assignee_id: "db-user-existing",
+    });
     stubRelay(relayOk());
 
     const res = await makeApp().fetch(
@@ -527,12 +566,85 @@ describe("POST /send", () => {
 
     expect(res.status).toBe(200);
     expect(getUserByEmail).not.toHaveBeenCalled();
-    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
-      threadId?: string;
-      assigneeId?: string | null;
-    };
-    expect(arg.threadId).toBe("thr_1");
-    expect(arg.assigneeId).toBeUndefined();
+    expect(claimThread).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a personal-mailbox thread when replying", async () => {
+    getThread.mockResolvedValue(
+      threadWith("<orig-personal@example.com>", null, MAILBOX.id),
+    );
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: personal",
+        text: "reply",
+        threadId: "thr_1",
+        mailboxId: MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getUserByEmail).not.toHaveBeenCalled();
+    expect(claimThread).not.toHaveBeenCalled();
+  });
+
+  it("still sends a shared-mailbox reply when the claim loses", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    getThread.mockResolvedValue(
+      threadWith("<orig-shared@example.com>", null, SHARED_MAILBOX.id),
+    );
+    claimThread.mockResolvedValue(false);
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: shared",
+        text: "reply",
+        threadId: "thr_1",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(claimThread).toHaveBeenCalledWith(
+      expect.anything(),
+      "thr_1",
+      "db-user-nelson",
+    );
+    expect(insertOutboundMessage).toHaveBeenCalledTimes(1);
+    const body = (await res.json()) as { ok: boolean };
+    expect(body.ok).toBe(true);
+  });
+
+  it("still sends a shared-mailbox reply when claiming throws", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    getThread.mockResolvedValue(
+      threadWith("<orig-shared@example.com>", null, SHARED_MAILBOX.id),
+    );
+    claimThread.mockRejectedValue(new Error("claim failed"));
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: shared",
+        text: "reply",
+        threadId: "thr_1",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertOutboundMessage).toHaveBeenCalledTimes(1);
+    const body = (await res.json()) as { ok: boolean };
+    expect(body.ok).toBe(true);
   });
 
   it("writes a sent send_log row and persists the outbound message on success", async () => {

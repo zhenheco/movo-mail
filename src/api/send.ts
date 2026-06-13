@@ -28,6 +28,7 @@ import {
   getThread,
   getSendableMailboxes,
   getUserByEmail,
+  claimThread,
   insertOutboundMessage,
   insertSendLog,
   insertAudit,
@@ -337,15 +338,35 @@ export function sendRoutes(): Hono<AccessEnv> {
       mailbox,
     );
     let assigneeId: string | null = null;
-    if (thread === null && mailbox.kind === "shared") {
+    let dbUserId: string | null = null;
+    const needsSharedUser =
+      mailbox.kind === "shared" &&
+      (thread === null || thread.assignee_id === null);
+    if (needsSharedUser) {
       try {
         const dbUser = await getUserByEmail(c.env, user.email);
-        assigneeId = dbUser?.id ?? null;
+        dbUserId = dbUser?.id ?? null;
       } catch {
+        if (thread === null) {
+          return c.json({ error: "Unable to resolve your user." }, 500);
+        }
+      }
+      if (!dbUserId && thread === null) {
         return c.json({ error: "Unable to resolve your user." }, 500);
       }
-      if (!assigneeId) {
-        return c.json({ error: "Unable to resolve your user." }, 500);
+    }
+    if (thread === null && mailbox.kind === "shared") {
+      assigneeId = dbUserId;
+    } else if (
+      thread !== null &&
+      mailbox.kind === "shared" &&
+      thread.assignee_id === null &&
+      dbUserId
+    ) {
+      try {
+        await claimThread(c.env, thread.id, dbUserId);
+      } catch (err) {
+        console.error("thread claim failed", err);
       }
     }
 

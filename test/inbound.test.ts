@@ -237,6 +237,17 @@ describe("handleInbound", () => {
     expect(parsed.references).toEqual(["<root-123@example.com>"]);
   });
 
+  it("does not compute or pass an assignee for inbound messages", async () => {
+    const { bucket } = makeR2();
+    const env = makeEnv(bucket);
+    const msg = makeMessage(PLAIN_EML, "support@movo.com.my");
+
+    await handleInbound(msg, env);
+
+    expect(db.insertInboundMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(db.insertInboundMessage).mock.calls[0]).toHaveLength(3);
+  });
+
   it("does not throw and skips indexing when the mailbox is unknown", async () => {
     vi.mocked(db.getMailboxByAddress).mockResolvedValue(null);
     const { bucket } = makeR2();

@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: closed
 Type: feat
 
 # 03 — 收信歸屬 + 公海 + 回覆即認領
