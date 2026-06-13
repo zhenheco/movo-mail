@@ -20,18 +20,30 @@ import type { AccessUser, AiDraftRequest } from "../src/types";
 import type { AuditInput } from "../src/db";
 
 // ── Mock the DB module ───────────────────────────────────────────────────────
-// The route imports getThread + insertAudit from ../db, and ./scope's
-// userOwnsMailbox (used by the ownership gate) imports getMailboxesForUser from
-// ../db. All three must be mocked so the gate resolves the caller's mailboxes.
+// The route imports getThread + insertAudit from ../db, and the visibility gate
+// resolves the Access actor to a DB user before checking canUserReadThread.
 const getThread = vi.fn(async (..._args: unknown[]): Promise<unknown> => null);
 const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit-id");
 const getMailboxesForUser = vi.fn(
   async (..._args: unknown[]): Promise<unknown[]> => [],
 );
+const canUserReadThread = vi.fn(async (..._args: unknown[]): Promise<boolean> => true);
+const getUserByEmail = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({
+  id: "db-user-1",
+  email: "staff@movo.com.my",
+  name: null,
+  role: "user",
+  created_at: 1,
+  updated_at: 1,
+}));
+const getUserRole = vi.fn(async (..._args: unknown[]): Promise<"user" | "admin"> => "user");
 vi.mock("../src/db", () => ({
   getThread: (...args: unknown[]) => getThread(...args),
   insertAudit: (...args: unknown[]) => insertAudit(...args),
   getMailboxesForUser: (...args: unknown[]) => getMailboxesForUser(...args),
+  canUserReadThread: (...args: unknown[]) => canUserReadThread(...args),
+  getUserByEmail: (...args: unknown[]) => getUserByEmail(...args),
+  getUserRole: (...args: unknown[]) => getUserRole(...args),
 }));
 
 /** A Mailbox-shaped record owned by the test ACTOR for the gated mailbox. */
@@ -210,6 +222,10 @@ describe("POST /ai/draft", () => {
     // so the ownership gate passes for the existing happy-path tests.
     getMailboxesForUser.mockReset();
     getMailboxesForUser.mockResolvedValue([ownedMailbox(MAILBOX_ID)]);
+    canUserReadThread.mockReset();
+    canUserReadThread.mockResolvedValue(true);
+    getUserByEmail.mockClear();
+    getUserRole.mockClear();
   });
 
   afterEach(() => {
@@ -235,6 +251,36 @@ describe("POST /ai/draft", () => {
     expect(calls[0]?.url).toContain("api.anthropic.com");
     expect(calls[0]?.url).not.toContain("cf-email");
     expect(calls[0]?.url).not.toContain("/send");
+  });
+
+  it("returns an AI draft for a visible shared thread the caller does not own", async () => {
+    getMailboxesForUser.mockResolvedValue([]);
+    getThread.mockResolvedValue({
+      ...threadWith([inboundMessage(["staff@movo.com.my"])]),
+      mailbox_id: "mb-shared",
+    });
+    canUserReadThread.mockResolvedValue(true);
+    mockFetch(() => anthropicOk("Shared reply"));
+
+    const res = await makeApp().fetch(draftRequest(validBody), makeEnv(makeKV()));
+
+    expect(res.status).toBe(200);
+    expect(canUserReadThread).toHaveBeenCalledWith(expect.anything(), THREAD_ID, {
+      userId: "db-user-1",
+      isAdmin: false,
+    });
+  });
+
+  it("404 when the caller cannot read the thread", async () => {
+    getThread.mockResolvedValue(threadWith([inboundMessage(["staff@movo.com.my"])]));
+    canUserReadThread.mockResolvedValue(false);
+    const calls = mockFetch(() => anthropicOk("should not be used"));
+
+    const res = await makeApp().fetch(draftRequest(validBody), makeEnv(makeKV()));
+
+    expect(res.status).toBe(404);
+    expect(calls).toHaveLength(0);
+    expect(insertAudit).not.toHaveBeenCalled();
   });
 
   it("passes AI_API_KEY and the model to the LLM call", async () => {
@@ -319,10 +365,10 @@ describe("POST /ai/draft", () => {
     expect((lastAudit().detail as { outcome: string }).outcome).toBe("provider_error");
   });
 
-  it("returns 404 (no IDOR) and charges no guardrail when the caller does not own the thread's mailbox", async () => {
-    // Thread exists, but in a mailbox the caller does NOT own.
+  it("returns 404 (no IDOR) and charges no guardrail when the caller cannot read the thread", async () => {
+    // Thread exists, but the visibility predicate denies this caller.
     getThread.mockResolvedValue(threadWith([inboundMessage(["staff@movo.com.my"])]));
-    getMailboxesForUser.mockResolvedValue([ownedMailbox("some-other-mailbox")]);
+    canUserReadThread.mockResolvedValue(false);
     const calls = mockFetch(() => anthropicOk("should not be called"));
 
     const res = await makeApp().fetch(draftRequest(validBody), makeEnv(makeKV()));

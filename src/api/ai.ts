@@ -18,8 +18,8 @@ import type { AccessEnv } from "../middleware/access";
 import type { AiDraftRequest, Direction } from "../types";
 import type { MessageWithAttachments } from "../db";
 import { draftReply } from "../lib/ai";
-import { getThread, insertAudit } from "../db";
-import { userOwnsMailbox } from "./scope";
+import { canUserReadThread, getThread, insertAudit } from "../db";
+import { resolveViewer } from "./scope";
 
 /** Drafts allowed per mailbox per rolling window. Conservative internal default. */
 const RATE_LIMIT_MAX = 20;
@@ -141,13 +141,14 @@ export function aiRoutes(): Hono<AccessEnv> {
     //     the read routes. This MUST run before allowDraft() and any audit
     //     write so a victim mailbox's rate-limit counter / audit log can never
     //     be charged for a thread the caller has no right to touch.
-    let owns: boolean;
+    let canRead: boolean;
     try {
-      owns = await userOwnsMailbox(c.env, user, thread.mailbox_id);
+      const viewer = await resolveViewer(c.env, user);
+      canRead = await canUserReadThread(c.env, thread.id, viewer);
     } catch {
       return c.json({ error: "Failed to load the thread." }, 500);
     }
-    if (!owns) {
+    if (!canRead) {
       return c.json({ error: "Thread not found." }, 404);
     }
 

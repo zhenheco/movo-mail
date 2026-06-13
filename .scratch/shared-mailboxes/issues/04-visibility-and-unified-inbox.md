@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: closed
 Type: feat
 
 # 04 — 可見性（個人/共用/admin）+ 統一收件匣

@@ -29,6 +29,7 @@ import {
   getThreads,
   getThread,
   getMessage,
+  canUserReadThread,
   searchMessages,
   insertInboundMessage,
   insertOutboundMessage,
@@ -42,6 +43,8 @@ import {
   getMailboxByAddress,
   getMailboxesForUser,
   getSendableMailboxes,
+  getThreadsVisible,
+  getVisibleThreadsForUser,
   getThreadsForOwner,
   searchMessagesForOwner,
   type OutboundMessageInput,
@@ -180,6 +183,49 @@ async function seedUser(
      VALUES (?, ?, ?, ?, ?)`,
   )
     .bind(id, email, null, now, now)
+    .run();
+}
+
+async function seedSharedVisibilityFixture(env: Env): Promise<void> {
+  await seedUser(env, "u-kee", "kee@movo.com.my");
+  await seedUser(env, "u-priss", "priss@movo.com.my");
+  await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+
+  await insertInboundMessage(
+    env,
+    makeInbound({
+      mailboxAddress: "hello@movo.com.my",
+      messageId: "<shared-unassigned@x>",
+      subject: "Unassigned",
+      date: 1_700_000_000_000,
+    }),
+  );
+  await insertInboundMessage(
+    env,
+    makeInbound({
+      mailboxAddress: "hello@movo.com.my",
+      messageId: "<shared-kee@x>",
+      subject: "Kee claimed",
+      date: 1_700_000_100_000,
+    }),
+  );
+  await insertInboundMessage(
+    env,
+    makeInbound({
+      mailboxAddress: "hello@movo.com.my",
+      messageId: "<shared-priss@x>",
+      subject: "Priss claimed",
+      date: 1_700_000_200_000,
+    }),
+  );
+
+  const allShared = await getThreads(env, "mb-shared");
+  const threadIdBySubject = new Map(allShared.map((t) => [t.subject, t.id]));
+  await env.DB.prepare(`UPDATE threads SET assignee_id = ? WHERE id = ?`)
+    .bind("u-kee", threadIdBySubject.get("Kee claimed"))
+    .run();
+  await env.DB.prepare(`UPDATE threads SET assignee_id = ? WHERE id = ?`)
+    .bind("u-priss", threadIdBySubject.get("Priss claimed"))
     .run();
 }
 
@@ -359,6 +405,222 @@ describe("db (real SQL via node:sqlite)", () => {
 
     it("returns [] for a user that owns no mailboxes (injection-safe)", async () => {
       expect(await getThreadsForOwner(env, "ghost' OR '1'='1")).toHaveLength(0);
+    });
+  });
+
+  describe("getThreadsVisible", () => {
+    it("returns shared mailbox threads assigned to the viewer or unassigned", async () => {
+      await seedSharedVisibilityFixture(env);
+
+      const threads = await getThreadsVisible(env, "mb-shared", {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+
+      expect(threads.map((t) => t.subject)).toEqual([
+        "Kee claimed",
+        "Unassigned",
+      ]);
+    });
+
+    it("does not show Kee-claimed shared threads to Priss", async () => {
+      await seedSharedVisibilityFixture(env);
+
+      const threads = await getThreadsVisible(env, "mb-shared", {
+        userId: "u-priss",
+        isAdmin: false,
+      });
+
+      expect(threads.map((t) => t.subject)).toEqual([
+        "Priss claimed",
+        "Unassigned",
+      ]);
+    });
+
+    it("shows unassigned shared threads to both Kee and Priss", async () => {
+      await seedSharedVisibilityFixture(env);
+
+      const keeThreads = await getThreadsVisible(env, "mb-shared", {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+      const prissThreads = await getThreadsVisible(env, "mb-shared", {
+        userId: "u-priss",
+        isAdmin: false,
+      });
+
+      expect(keeThreads.some((t) => t.subject === "Unassigned")).toBe(true);
+      expect(prissThreads.some((t) => t.subject === "Unassigned")).toBe(true);
+    });
+
+    it("keeps personal mailbox threads owner-only", async () => {
+      await seedUser(env, "u-kee", "kee@movo.com.my");
+      await seedUser(env, "u-priss", "priss@movo.com.my");
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "kee@movo.com.my",
+          messageId: "<kee-personal@x>",
+          subject: "Kee personal",
+          date: 1_700_000_000_000,
+        }),
+      );
+
+      const ownerThreads = await getThreadsVisible(env, "mb-kee", {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+      const otherThreads = await getThreadsVisible(env, "mb-kee", {
+        userId: "u-priss",
+        isAdmin: false,
+      });
+
+      expect(ownerThreads.map((t) => t.subject)).toEqual(["Kee personal"]);
+      expect(otherThreads).toHaveLength(0);
+    });
+  });
+
+  describe("getVisibleThreadsForUser", () => {
+    it("returns owned personal threads plus viewer-assigned and unassigned shared threads", async () => {
+      await seedSharedVisibilityFixture(env);
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await seedMailbox(env, "mb-priss", "priss@movo.com.my", "u-priss");
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "kee@movo.com.my",
+          messageId: "<kee-personal@x>",
+          subject: "Kee personal",
+          date: 1_700_000_300_000,
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "priss@movo.com.my",
+          messageId: "<priss-personal@x>",
+          subject: "Priss personal",
+          date: 1_700_000_400_000,
+        }),
+      );
+
+      const threads = await getVisibleThreadsForUser(env, {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+
+      expect(threads.map((t) => t.subject)).toEqual([
+        "Kee personal",
+        "Kee claimed",
+        "Unassigned",
+      ]);
+    });
+
+    it("returns all shared threads for admin but not other users' personal threads", async () => {
+      await seedSharedVisibilityFixture(env);
+      await seedUser(env, "u-boss", "boss@movo.com.my");
+      await env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`)
+        .bind("u-boss")
+        .run();
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await seedMailbox(env, "mb-priss", "priss@movo.com.my", "u-priss");
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "kee@movo.com.my",
+          messageId: "<kee-personal@x>",
+          subject: "Kee personal",
+          date: 1_700_000_300_000,
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "priss@movo.com.my",
+          messageId: "<priss-personal@x>",
+          subject: "Priss personal",
+          date: 1_700_000_400_000,
+        }),
+      );
+
+      const threads = await getVisibleThreadsForUser(env, {
+        userId: "u-boss",
+        isAdmin: true,
+      });
+
+      expect(threads.map((t) => t.subject)).toEqual([
+        "Priss claimed",
+        "Kee claimed",
+        "Unassigned",
+      ]);
+    });
+
+    it("uses the same visibility predicate for single-thread reads", async () => {
+      await seedSharedVisibilityFixture(env);
+      await seedUser(env, "u-boss", "boss@movo.com.my");
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await seedMailbox(env, "mb-priss", "priss@movo.com.my", "u-priss");
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "kee@movo.com.my",
+          messageId: "<kee-personal@x>",
+          subject: "Kee personal",
+        }),
+      );
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "priss@movo.com.my",
+          messageId: "<priss-personal@x>",
+          subject: "Priss personal",
+        }),
+      );
+
+      const allThreads = [
+        ...(await getThreads(env, "mb-shared")),
+        ...(await getThreads(env, "mb-kee")),
+        ...(await getThreads(env, "mb-priss")),
+      ];
+      const idBySubject = new Map(allThreads.map((t) => [t.subject, t.id]));
+
+      await expect(
+        canUserReadThread(env, idBySubject.get("Unassigned")!, {
+          userId: "u-kee",
+          isAdmin: false,
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        canUserReadThread(env, idBySubject.get("Kee claimed")!, {
+          userId: "u-kee",
+          isAdmin: false,
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        canUserReadThread(env, idBySubject.get("Priss claimed")!, {
+          userId: "u-kee",
+          isAdmin: false,
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        canUserReadThread(env, idBySubject.get("Priss personal")!, {
+          userId: "u-kee",
+          isAdmin: false,
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        canUserReadThread(env, idBySubject.get("Priss claimed")!, {
+          userId: "u-boss",
+          isAdmin: true,
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        canUserReadThread(env, idBySubject.get("Kee personal")!, {
+          userId: "u-boss",
+          isAdmin: true,
+        }),
+      ).resolves.toBe(false);
     });
   });
 

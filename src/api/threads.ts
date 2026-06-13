@@ -12,8 +12,13 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import { getThreads, getThreadsForOwner } from "../db";
-import { userOwnsMailbox } from "./scope";
+import {
+  getMailboxById,
+  getThreads,
+  getThreadsVisible,
+  getVisibleThreadsForUser,
+} from "../db";
+import { resolveViewer, userOwnsMailbox } from "./scope";
 
 /** Build the /threads sub-router. */
 export function threadRoutes(): Hono<AccessEnv> {
@@ -25,7 +30,8 @@ export function threadRoutes(): Hono<AccessEnv> {
   app.get("/threads/all", async (c) => {
     const user = c.get("user");
     try {
-      const threads = await getThreadsForOwner(c.env, user.email);
+      const viewer = await resolveViewer(c.env, user);
+      const threads = await getVisibleThreadsForUser(c.env, viewer);
       return c.json({ threads });
     } catch {
       return c.json({ error: "failed to load threads" }, 500);
@@ -42,11 +48,18 @@ export function threadRoutes(): Hono<AccessEnv> {
     const user = c.get("user");
     try {
       const owns = await userOwnsMailbox(c.env, user, mailboxId);
-      if (!owns) {
+      if (owns) {
+        const threads = await getThreads(c.env, mailboxId);
+        return c.json({ threads });
+      }
+
+      const mailbox = await getMailboxById(c.env, mailboxId);
+      if (mailbox?.kind !== "shared") {
         // Never reveal whether the mailbox exists; just deny.
         return c.json({ error: "forbidden" }, 403);
       }
-      const threads = await getThreads(c.env, mailboxId);
+      const viewer = await resolveViewer(c.env, user);
+      const threads = await getThreadsVisible(c.env, mailboxId, viewer);
       return c.json({ threads });
     } catch {
       return c.json({ error: "failed to load threads" }, 500);

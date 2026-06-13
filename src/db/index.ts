@@ -98,6 +98,11 @@ export interface UpsertThreadInput {
   assigneeId?: string | null;
 }
 
+export interface ThreadVisibilityViewer {
+  userId: string | null;
+  isAdmin: boolean;
+}
+
 /** Fields used to write a send-log row. */
 export interface SendLogInput {
   messageId: string | null;
@@ -175,6 +180,10 @@ const MESSAGE_COLS = `id, thread_id, mailbox_id, message_id, in_reply_to,
         cc_addresses, bcc_addresses, subject, snippet, text_body, html_body,
         r2_raw_key, has_attachments, unread, date, created_at`;
 
+const VISIBLE_THREAD_PREDICATE = `((mb.kind = 'personal' AND mb.owner_id = ?)
+            OR (mb.kind = 'shared'
+                AND (? = 1 OR t.assignee_id = ? OR t.assignee_id IS NULL)))`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reads
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +217,79 @@ export async function getThreads(
   });
 }
 
+/** List threads in a mailbox that are visible to the resolved DB user. */
+export async function getThreadsVisible(
+  env: Env,
+  mailboxId: string,
+  viewer: ThreadVisibilityViewer,
+): Promise<Thread[]> {
+  return guard("getThreadsVisible", async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
+              t.message_count, t.unread, t.created_at, t.updated_at,
+              t.assignee_id,
+              (SELECT m.id FROM messages m
+                 WHERE m.thread_id = t.id
+                 ORDER BY m.date DESC, m.rowid DESC
+                 LIMIT 1) AS last_message_id
+        FROM threads t
+         JOIN mailboxes mb ON mb.id = t.mailbox_id
+        WHERE t.mailbox_id = ?
+          AND ${VISIBLE_THREAD_PREDICATE}
+        ORDER BY t.last_message_at DESC`,
+    )
+      .bind(mailboxId, viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId)
+      .all<Thread>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
+/** List every thread visible to the resolved DB user for the unified inbox. */
+export async function getVisibleThreadsForUser(
+  env: Env,
+  viewer: ThreadVisibilityViewer,
+): Promise<Thread[]> {
+  return guard("getVisibleThreadsForUser", async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
+              t.message_count, t.unread, t.created_at, t.updated_at,
+              t.assignee_id,
+              (SELECT m.id FROM messages m
+                 WHERE m.thread_id = t.id
+                 ORDER BY m.date DESC, m.rowid DESC
+                 LIMIT 1) AS last_message_id
+         FROM threads t
+         JOIN mailboxes mb ON mb.id = t.mailbox_id
+        WHERE ${VISIBLE_THREAD_PREDICATE}
+        ORDER BY t.last_message_at DESC`,
+    )
+      .bind(viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId)
+      .all<Thread>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
+/** True when the resolved DB user can read the given thread. */
+export async function canUserReadThread(
+  env: Env,
+  threadId: string,
+  viewer: ThreadVisibilityViewer,
+): Promise<boolean> {
+  return guard("canUserReadThread", async () => {
+    const row = await env.DB.prepare(
+      `SELECT 1 AS allowed
+         FROM threads t
+         JOIN mailboxes mb ON mb.id = t.mailbox_id
+        WHERE t.id = ?
+          AND ${VISIBLE_THREAD_PREDICATE}
+        LIMIT 1`,
+    )
+      .bind(threadId, viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId)
+      .first<{ allowed: number }>();
+    return row !== null;
+  });
+}
+
 /**
  * List threads across EVERY mailbox the user owns, newest activity first —
  * the unified ("All mailboxes") inbox. One query joins threads → mailboxes →
@@ -215,6 +297,8 @@ export async function getThreads(
  * threads), mirroring getThreads' last_message_id subquery so each row carries
  * a real message id for the reading pane. Each thread keeps its `mailbox_id`,
  * which the UI maps to a source-mailbox label.
+ *
+ * @deprecated Use getVisibleThreadsForUser for the read API unified inbox.
  */
 export async function getThreadsForOwner(
   env: Env,
@@ -402,6 +486,23 @@ export async function getMailboxByAddress(
         WHERE address = ?`,
     )
       .bind(normalizeAddress(addr))
+      .first<Mailbox>();
+    return row ? { ...row } : null;
+  });
+}
+
+/** Resolve a mailbox by id. */
+export async function getMailboxById(
+  env: Env,
+  id: string,
+): Promise<Mailbox | null> {
+  return guard("getMailboxById", async () => {
+    const row = await env.DB.prepare(
+      `SELECT id, address, display_name, owner_id, kind, created_at, updated_at
+         FROM mailboxes
+        WHERE id = ?`,
+    )
+      .bind(id)
       .first<Mailbox>();
     return row ? { ...row } : null;
   });

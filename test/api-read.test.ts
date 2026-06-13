@@ -19,29 +19,47 @@ import type { MessageWithAttachments } from "../src/db";
 // ── Mock the db contract ──────────────────────────────────────────────────
 vi.mock("../src/db", () => ({
   getThreads: vi.fn(),
+  getThreadsVisible: vi.fn(),
+  getVisibleThreadsForUser: vi.fn(),
   getThreadsForOwner: vi.fn(),
+  canUserReadThread: vi.fn(),
   getMessage: vi.fn(),
+  getMailboxById: vi.fn(),
   searchMessages: vi.fn(),
   searchMessagesForOwner: vi.fn(),
   getMailboxesForUser: vi.fn(),
+  getUserByEmail: vi.fn(),
+  getUserRole: vi.fn(),
 }));
 
 import {
   getThreads,
+  getThreadsVisible,
+  getVisibleThreadsForUser,
   getThreadsForOwner,
+  canUserReadThread,
   getMessage,
+  getMailboxById,
   searchMessages,
   searchMessagesForOwner,
   getMailboxesForUser,
+  getUserByEmail,
+  getUserRole,
 } from "../src/db";
 import { readRoutes } from "../src/api/routes";
 
 const mGetThreads = vi.mocked(getThreads);
+const mGetThreadsVisible = vi.mocked(getThreadsVisible);
+const mGetVisibleThreadsForUser = vi.mocked(getVisibleThreadsForUser);
 const mGetThreadsForOwner = vi.mocked(getThreadsForOwner);
+const mCanUserReadThread = vi.mocked(canUserReadThread);
 const mGetMessage = vi.mocked(getMessage);
+const mGetMailboxById = vi.mocked(getMailboxById);
 const mSearchMessages = vi.mocked(searchMessages);
 const mSearchMessagesForOwner = vi.mocked(searchMessagesForOwner);
 const mGetMailboxesForUser = vi.mocked(getMailboxesForUser);
+const mGetUserByEmail = vi.mocked(getUserByEmail);
+const mGetUserRole = vi.mocked(getUserRole);
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 const USER: AccessUser = { sub: "u-sub-1", email: "alice@movo.com.my" };
@@ -52,6 +70,16 @@ const OWNED_MAILBOX: Mailbox = {
   display_name: "Alice",
   owner_id: "user-alice",
   kind: "personal",
+  created_at: 1,
+  updated_at: 1,
+};
+
+const SHARED_MAILBOX: Mailbox = {
+  id: "mb-shared",
+  address: "hello@movo.com.my",
+  display_name: "Hello",
+  owner_id: null,
+  kind: "shared",
   created_at: 1,
   updated_at: 1,
 };
@@ -134,6 +162,17 @@ beforeEach(() => {
   vi.clearAllMocks();
   // By default the user owns OWNED_MAILBOX.
   mGetMailboxesForUser.mockResolvedValue([OWNED_MAILBOX]);
+  mGetMailboxById.mockResolvedValue(null);
+  mCanUserReadThread.mockResolvedValue(true);
+  mGetUserByEmail.mockResolvedValue({
+    id: "user-alice",
+    email: USER.email,
+    name: null,
+    role: "user",
+    created_at: 1,
+    updated_at: 1,
+  });
+  mGetUserRole.mockResolvedValue("user");
 });
 
 // ── GET /threads ────────────────────────────────────────────────────────
@@ -160,6 +199,42 @@ describe("GET /threads", () => {
     expect(mGetThreads).not.toHaveBeenCalled();
   });
 
+  it("403 for another user's personal mailbox", async () => {
+    mGetMailboxById.mockResolvedValue({
+      id: "mb-eve",
+      address: "eve@movo.com.my",
+      display_name: "Eve",
+      owner_id: "user-eve",
+      kind: "personal",
+      created_at: 1,
+      updated_at: 1,
+    });
+
+    const res = await dispatch("/threads?mailbox=mb-eve");
+
+    expect(res.status).toBe(403);
+    expect(mGetThreads).not.toHaveBeenCalled();
+    expect(mGetThreadsVisible).not.toHaveBeenCalled();
+  });
+
+  it("returns visible threads for a shared mailbox the user does not own", async () => {
+    mGetMailboxById.mockResolvedValue(SHARED_MAILBOX);
+    mGetThreadsVisible.mockResolvedValue([
+      makeThread({ id: "th-shared", mailbox_id: "mb-shared" }),
+    ]);
+
+    const res = await dispatch("/threads?mailbox=mb-shared");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { threads: Thread[] };
+    expect(body.threads.map((t) => t.id)).toEqual(["th-shared"]);
+    expect(mGetThreadsVisible).toHaveBeenCalledWith(expect.anything(), "mb-shared", {
+      userId: "user-alice",
+      isAdmin: false,
+    });
+    expect(mGetThreads).not.toHaveBeenCalled();
+  });
+
   it("500 when db throws", async () => {
     mGetThreads.mockRejectedValue(new Error("db down"));
     const res = await dispatch("/threads?mailbox=mb-alice");
@@ -169,8 +244,8 @@ describe("GET /threads", () => {
 
 // ── GET /threads/all (unified inbox) ──────────────────────────────────────
 describe("GET /threads/all", () => {
-  it("returns merged threads across owned mailboxes (no mailbox param needed)", async () => {
-    mGetThreadsForOwner.mockResolvedValue([
+  it("returns threads from the visibility query for the resolved DB user", async () => {
+    mGetVisibleThreadsForUser.mockResolvedValue([
       makeThread({ id: "th-1", mailbox_id: "mb-alice" }),
       makeThread({ id: "th-2", mailbox_id: "mb-team" }),
     ]);
@@ -178,17 +253,32 @@ describe("GET /threads/all", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { threads: Thread[] };
     expect(body.threads.map((t) => t.id)).toEqual(["th-1", "th-2"]);
-    // Scoped by the verified email, not a client-supplied mailbox.
-    expect(mGetThreadsForOwner).toHaveBeenCalledWith(
-      expect.anything(),
-      USER.email,
-    );
+    expect(mGetVisibleThreadsForUser).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-alice",
+      isAdmin: false,
+    });
+    expect(mGetThreadsForOwner).not.toHaveBeenCalled();
     // The per-mailbox path must NOT be used for the unified view.
     expect(mGetThreads).not.toHaveBeenCalled();
   });
 
+  it("passes admin viewers to the visibility query", async () => {
+    mGetUserRole.mockResolvedValue("admin");
+    mGetVisibleThreadsForUser.mockResolvedValue([
+      makeThread({ id: "th-admin", mailbox_id: "mb-shared" }),
+    ]);
+
+    const res = await dispatch("/threads/all");
+
+    expect(res.status).toBe(200);
+    expect(mGetVisibleThreadsForUser).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-alice",
+      isAdmin: true,
+    });
+  });
+
   it("500 when db throws", async () => {
-    mGetThreadsForOwner.mockRejectedValue(new Error("db down"));
+    mGetVisibleThreadsForUser.mockRejectedValue(new Error("db down"));
     const res = await dispatch("/threads/all");
     expect(res.status).toBe(500);
   });
@@ -204,7 +294,17 @@ describe("GET /message/:id", () => {
 
   it("404 (not 403) when the message belongs to another mailbox", async () => {
     mGetMessage.mockResolvedValue(makeMessage({ mailbox_id: "mb-eve" }));
+    mCanUserReadThread.mockResolvedValue(false);
     const res = await dispatch("/message/msg-1");
+    expect(res.status).toBe(404);
+  });
+
+  it("404 when the caller cannot read the message thread", async () => {
+    mGetMessage.mockResolvedValue(makeMessage({ mailbox_id: "mb-alice" }));
+    mCanUserReadThread.mockResolvedValue(false);
+
+    const res = await dispatch("/message/msg-1");
+
     expect(res.status).toBe(404);
   });
 
@@ -219,6 +319,21 @@ describe("GET /message/:id", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { message: MessageWithAttachments };
     expect(body.message.html_body).toBe(rawHtml);
+  });
+
+  it("returns a shared-mailbox message when the caller can read its thread", async () => {
+    mGetMessage.mockResolvedValue(
+      makeMessage({ thread_id: "th-shared", mailbox_id: "mb-shared" }),
+    );
+    mCanUserReadThread.mockResolvedValue(true);
+
+    const res = await dispatch("/message/msg-1");
+
+    expect(res.status).toBe(200);
+    expect(mCanUserReadThread).toHaveBeenCalledWith(expect.anything(), "th-shared", {
+      userId: "user-alice",
+      isAdmin: false,
+    });
   });
 
   it("does not treat the R2 raw .eml as html_body when html_body is null", async () => {

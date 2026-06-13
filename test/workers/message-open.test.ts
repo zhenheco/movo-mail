@@ -24,6 +24,7 @@ const RESET_SQL: readonly string[] = [
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     name TEXT,
+    role TEXT NOT NULL DEFAULT 'user',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -103,8 +104,8 @@ async function resetDb(): Promise<void> {
 async function seedBase(): Promise<void> {
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO users (id, email, name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO users (id, email, name, role, created_at, updated_at)
+     VALUES (?, ?, ?, 'user', ?, ?)`,
   )
     .bind("user-1", USER.email, null, now, now)
     .run();

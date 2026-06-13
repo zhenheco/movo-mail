@@ -12,7 +12,25 @@
  */
 
 import type { Env, AccessUser, Mailbox } from "../types";
-import { getMailboxesForUser } from "../db";
+import { getMailboxesForUser, getUserByEmail, getUserRole } from "../db";
+
+export interface ResolvedViewer {
+  userId: string | null;
+  isAdmin: boolean;
+}
+
+/** Resolve route auth identity to the DB user id used by mailbox/thread rows. */
+export async function resolveViewer(
+  env: Env,
+  user: AccessUser,
+): Promise<ResolvedViewer> {
+  const dbUser = await getUserByEmail(env, user.email);
+  const role = await getUserRole(env, user.email);
+  return {
+    userId: dbUser?.id ?? null,
+    isAdmin: role === "admin",
+  };
+}
 
 /** Resolve the set of mailbox ids the authenticated user is allowed to read. */
 export async function getOwnedMailboxIds(

@@ -13,8 +13,8 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import { getMessage } from "../db";
-import { userOwnsMailbox } from "./scope";
+import { canUserReadThread, getMessage } from "../db";
+import { resolveViewer } from "./scope";
 
 /** Build the /message sub-router. */
 export function messageRoutes(): Hono<AccessEnv> {
@@ -33,10 +33,11 @@ export function messageRoutes(): Hono<AccessEnv> {
         return c.json({ error: "message not found" }, 404);
       }
 
-      // Auth scoping: deny (as 404 to avoid leaking existence) if the message's
-      // mailbox is not owned by the caller.
-      const owns = await userOwnsMailbox(c.env, user, message.mailbox_id);
-      if (!owns) {
+      // Auth scoping: deny (as 404 to avoid leaking existence) if the caller
+      // cannot see the thread this message belongs to.
+      const viewer = await resolveViewer(c.env, user);
+      const canRead = await canUserReadThread(c.env, message.thread_id, viewer);
+      if (!canRead) {
         return c.json({ error: "message not found" }, 404);
       }
 
