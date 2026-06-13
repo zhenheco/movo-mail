@@ -50,8 +50,37 @@ export function Compose({
   onClose,
   onSent,
 }: ComposeProps) {
+  // ── Field reference (what each piece is for; the From-cluster is the easy
+  //    one to confuse, so it's spelled out) ──────────────────────────────────
+  //
+  //  EDITABLE form fields (what the user sees + types):
+  //    to       — recipient line, comma-separated string. Parsed into
+  //               `recipients` for validation/send. A reply pre-fills the
+  //               original sender (initial.to).
+  //    subject  — subject line. A reply pre-fills "Re: …".
+  //    body     — the message text the user writes (or the AI draft fills in).
+  //    From     — which owned mailbox sends (the <select> / static line below).
+  //               Tracked as `fromId`, NOT a free-text field.
+  //
+  //  HIDDEN threading state (carried in `initial`, never shown as inputs):
+  //    initial.threadId    — set ⇒ this is a REPLY. Attaches the send to that
+  //                          thread, unlocks "AI draft", and locks the From box.
+  //    initial.inReplyTo   — RFC-5322 In-Reply-To header (last msg's Message-ID)
+  //    initial.references  — RFC-5322 References chain. Both make the reply nest
+  //                          correctly in the customer's mail client.
+  //    initial.history     — prior messages; fed to POST /api/ai/draft only.
+  //    idempotencyKeyRef   — one UUID per open panel; dedupes a double-click /
+  //                          retry so the same reply isn't sent twice.
+  //
+  //  The four From-* values, distinct on purpose:
+  //    fromAddress           (prop)  — fallback address, used ONLY if the
+  //                                    selected mailbox can't be resolved.
+  //    fromId                (state) — id of the mailbox the user picked.
+  //    fromBox               (deriv) — the MailboxSummary row matching fromId.
+  //    effectiveFromAddress  (deriv) — fromBox.address ?? fromAddress = the
+  //                                    address that actually sends.
   const idempotencyKeyRef = useRef(crypto.randomUUID());
-  const [to, setTo] = useState(initial.to);
+  const [to, setTo] = useState(initial.to); // recipient line (raw string)
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
   // Which owned mailbox sends. A reply is locked to the thread's mailbox
@@ -158,6 +187,8 @@ export function Compose({
           </Button>
         </div>
 
+        {/* From — sending mailbox. New message w/ >1 mailbox: editable <select>;
+            otherwise (incl. every reply) a fixed line locked to fromId. */}
         {canPickFrom ? (
           <label className="flex items-center gap-2 text-xs">
             <span className="font-medium text-muted-foreground">From</span>
@@ -181,6 +212,8 @@ export function Compose({
           </p>
         )}
 
+        {/* To — recipient line (comma-separated). Reply pre-fills the original
+            sender; parsed into `recipients` for validation. */}
         <label className="sr-only" htmlFor="compose-to">
           Recipients
         </label>
@@ -192,6 +225,7 @@ export function Compose({
           aria-invalid={to.length > 0 && !hasValidRecipient}
         />
 
+        {/* Subject — reply pre-fills "Re: …"; required to enable Send. */}
         <label className="sr-only" htmlFor="compose-subject">
           Subject
         </label>
@@ -202,6 +236,7 @@ export function Compose({
           placeholder="Subject"
         />
 
+        {/* Body — message text the user writes, or the AI draft fills in. */}
         <label className="sr-only" htmlFor="compose-body">
           Message body
         </label>

@@ -2,6 +2,11 @@
 
 > 做法 A（`mailboxes.kind` + `threads.assignee_id`），非做法 B（權限表）。
 > prd_id = `2026-06-12-shared-mailboxes`。
+>
+> **Update 2026-06-13**：`Customer@` 與 `Service@` 合併為單一 `customerservice@movo.com.my`
+> （display "Customer Service"）。現行共用信箱 = `hello@` + `customerservice@`。
+> 下文 `Customer@`／`Service@` 為原始設計記錄，視為同一個 `customerservice@`。
+> prod D1 已套用（兩者皆無歷史 thread/訊息，乾淨合併）；舊地址改走 FALLBACK_FORWARD。
 
 ---
 

@@ -4,6 +4,9 @@ Status: ready-for-agent
 
 > 來源 spec：`docs/superpowers/specs/2026-06-12-shared-mailboxes-design.md`
 > 做法 A（`mailboxes.kind` + `threads.assignee_id`），非權限表。
+>
+> **Update 2026-06-13**：`Customer@` + `Service@` 合併為單一 `customerservice@movo.com.my`。
+> 現行共用信箱 = `hello@` + `customerservice@`。下文兩地址視為同一個。
 
 ## Problem Statement
 
