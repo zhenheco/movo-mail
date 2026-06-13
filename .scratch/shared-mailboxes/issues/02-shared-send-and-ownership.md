@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: closed
 Type: feat
 
 # 02 — 共用信箱寄信 + 寄件歸屬

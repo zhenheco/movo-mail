@@ -21,12 +21,14 @@ import type { Env, AccessUser, Mailbox } from "../src/types";
 // ── Mock the db contract ──────────────────────────────────────────────────
 vi.mock("../src/db", () => ({
   getMailboxesForUser: vi.fn(),
+  getSendableMailboxes: vi.fn(),
 }));
 
-import { getMailboxesForUser } from "../src/db";
+import { getMailboxesForUser, getSendableMailboxes } from "../src/db";
 import { mailboxRoutes } from "../src/api/mailboxes";
 
 const mGetMailboxesForUser = vi.mocked(getMailboxesForUser);
+const mGetSendableMailboxes = vi.mocked(getSendableMailboxes);
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 const ALICE: AccessUser = { sub: "u-alice", email: "alice@movo.com.my" };
@@ -62,6 +64,10 @@ function makeApp(user: AccessUser) {
 
 function dispatch(user: AccessUser, env: Env = fakeEnv()) {
   return makeApp(user).request("/mailboxes", undefined, env);
+}
+
+function dispatchSendable(user: AccessUser, env: Env = fakeEnv()) {
+  return makeApp(user).request("/mailboxes/sendable", undefined, env);
 }
 
 beforeEach(() => {
@@ -144,5 +150,61 @@ describe("GET /mailboxes", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("Unable to load mailboxes.");
+  });
+});
+
+describe("GET /mailboxes/sendable", () => {
+  it("returns sendable mailboxes mapped to { id, address, displayName, kind }", async () => {
+    mGetSendableMailboxes.mockResolvedValue([
+      makeMailbox(),
+      makeMailbox({
+        id: "mb-shared",
+        address: "hello@movo.com.my",
+        display_name: "Hello",
+        owner_id: null,
+        kind: "shared",
+      }),
+    ]);
+
+    const res = await dispatchSendable(ALICE);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      mailboxes: {
+        id: string;
+        address: string;
+        displayName: string | null;
+        kind: string;
+      }[];
+    };
+    expect(body.mailboxes).toEqual([
+      {
+        id: "mb-alice",
+        address: "alice@movo.com.my",
+        displayName: "Alice",
+        kind: "personal",
+      },
+      {
+        id: "mb-shared",
+        address: "hello@movo.com.my",
+        displayName: "Hello",
+        kind: "shared",
+      },
+    ]);
+    expect(mGetSendableMailboxes).toHaveBeenCalledWith(
+      expect.anything(),
+      ALICE,
+    );
+    expect(mGetMailboxesForUser).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with a friendly error when the sendable lookup fails", async () => {
+    mGetSendableMailboxes.mockRejectedValue(new Error("db down"));
+
+    const res = await dispatchSendable(ALICE);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Unable to load sendable mailboxes.");
   });
 });

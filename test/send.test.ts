@@ -13,7 +13,7 @@
  *
  * Signatures mirror the real db contract exactly:
  *   getThread(env, id)             -> ThreadWithMessages | null
- *   getMailboxesForUser(env, email) -> Mailbox[]
+ *   getSendableMailboxes(env, user) -> Mailbox[]
  *   insertOutboundMessage(env, m)  -> Promise<string>
  *   insertSendLog(env, input)      -> Promise<string>
  *   insertAudit(env, input)        -> Promise<string>
@@ -28,6 +28,8 @@ import type { Env, AccessUser, Mailbox, SendRequest, SendResult } from "../src/t
 // ── mock the db contract (env-first signatures, matching src/db/index.ts) ─────
 const getThread = vi.fn((..._args: unknown[]): unknown => null);
 const getMailboxesForUser = vi.fn((..._args: unknown[]): unknown => []);
+const getSendableMailboxes = vi.fn((..._args: unknown[]): unknown => []);
+const getUserByEmail = vi.fn((..._args: unknown[]): unknown => null);
 const insertOutboundMessage = vi.fn(async (..._args: unknown[]): Promise<string> => "msg-row-1");
 const insertSendLog = vi.fn(async (..._args: unknown[]): Promise<string> => "send-log-1");
 const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit-1");
@@ -35,6 +37,8 @@ const insertAudit = vi.fn(async (..._args: unknown[]): Promise<string> => "audit
 vi.mock("../src/db", () => ({
   getThread: (...a: unknown[]) => getThread(...a),
   getMailboxesForUser: (...a: unknown[]) => getMailboxesForUser(...a),
+  getSendableMailboxes: (...a: unknown[]) => getSendableMailboxes(...a),
+  getUserByEmail: (...a: unknown[]) => getUserByEmail(...a),
   insertOutboundMessage: (...a: unknown[]) => insertOutboundMessage(...a),
   insertSendLog: (...a: unknown[]) => insertSendLog(...a),
   insertAudit: (...a: unknown[]) => insertAudit(...a),
@@ -61,13 +65,28 @@ const MAILBOX: Mailbox = {
   updated_at: 0,
 };
 
+const SHARED_MAILBOX: Mailbox = {
+  id: "mbx_hello",
+  address: "hello@movo.com.my",
+  display_name: "Hello",
+  owner_id: null,
+  kind: "shared",
+  created_at: 0,
+  updated_at: 0,
+};
+
 /** A ThreadWithMessages-shaped reply target (one inbound message). */
-function threadWith(messageId: string, references: string | null) {
+function threadWith(
+  messageId: string,
+  references: string | null,
+  mailboxId: string = MAILBOX.id,
+) {
   return {
     id: "thr_1",
-    mailbox_id: MAILBOX.id,
+    mailbox_id: mailboxId,
     subject: "Order #1",
     snippet: "hi",
+    assignee_id: null,
     last_message_at: 100,
     message_count: 1,
     unread: 0,
@@ -77,7 +96,7 @@ function threadWith(messageId: string, references: string | null) {
       {
         id: "m1",
         thread_id: "thr_1",
-        mailbox_id: MAILBOX.id,
+        mailbox_id: mailboxId,
         message_id: messageId,
         in_reply_to: null,
         references,
@@ -180,6 +199,8 @@ beforeEach(() => {
   vi.restoreAllMocks();
   getThread.mockReset();
   getMailboxesForUser.mockReset();
+  getSendableMailboxes.mockReset();
+  getUserByEmail.mockReset();
   insertOutboundMessage.mockClear();
   insertSendLog.mockClear();
   insertAudit.mockClear();
@@ -188,6 +209,15 @@ beforeEach(() => {
   insertAudit.mockResolvedValue("audit-1");
   getThread.mockResolvedValue(null);
   getMailboxesForUser.mockResolvedValue([MAILBOX]);
+  getSendableMailboxes.mockResolvedValue([MAILBOX]);
+  getUserByEmail.mockResolvedValue({
+    id: "db-user-nelson",
+    email: USER.email,
+    name: USER.name ?? null,
+    role: "user",
+    created_at: 0,
+    updated_at: 0,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +300,28 @@ describe("sendViaCfEmail", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("POST /send", () => {
+  it("allows a non-owner to send from a shared mailbox and forces relay from to that mailbox", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        from: { address: "attacker@evil.com" },
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const sent = sentBody(fetchMock);
+    expect(sent.from).toBe(SHARED_MAILBOX.address);
+    expect(String(sent.from)).not.toContain("evil.com");
+  });
+
   it("forces from to the caller's mailbox even if a different from is supplied", async () => {
     const fetchMock = stubRelay(relayOk());
 
@@ -308,8 +360,26 @@ describe("POST /send", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects another user's personal mailbox even when shared mailboxes are sendable", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Hi",
+        text: "hello",
+        mailboxId: "mbx_someone_personal",
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("requires mailboxId when the authenticated user owns multiple mailboxes", async () => {
-    getMailboxesForUser.mockResolvedValue([
+    getSendableMailboxes.mockResolvedValue([
       MAILBOX,
       {
         ...MAILBOX,
@@ -389,6 +459,80 @@ describe("POST /send", () => {
     expect(getThread).not.toHaveBeenCalled();
     const headers = sentBody(fetchMock).headers as Record<string, string> | undefined;
     expect(headers?.["In-Reply-To"]).toBeUndefined();
+  });
+
+  it("assigns a brand-new shared-mailbox thread to the sender's database user id", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "New shared",
+        text: "hello",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getUserByEmail).toHaveBeenCalledWith(expect.anything(), USER.email);
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
+      threadId?: string;
+      assigneeId?: string | null;
+    };
+    expect(arg.threadId).toBeUndefined();
+    expect(arg.assigneeId).toBe("db-user-nelson");
+    expect(arg.assigneeId).not.toBe(USER.sub);
+  });
+
+  it("does not assign a brand-new personal-mailbox thread", async () => {
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "New personal",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getUserByEmail).not.toHaveBeenCalled();
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
+      assigneeId?: string | null;
+    };
+    expect(arg.assigneeId).toBeUndefined();
+  });
+
+  it("does not assign or claim when replying to an existing shared-mailbox thread", async () => {
+    getSendableMailboxes.mockResolvedValue([SHARED_MAILBOX]);
+    getThread.mockResolvedValue(
+      threadWith("<orig-shared@example.com>", null, SHARED_MAILBOX.id),
+    );
+    stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Re: shared",
+        text: "reply",
+        threadId: "thr_1",
+        mailboxId: SHARED_MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(getUserByEmail).not.toHaveBeenCalled();
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
+      threadId?: string;
+      assigneeId?: string | null;
+    };
+    expect(arg.threadId).toBe("thr_1");
+    expect(arg.assigneeId).toBeUndefined();
   });
 
   it("writes a sent send_log row and persists the outbound message on success", async () => {
@@ -493,7 +637,7 @@ describe("POST /send", () => {
   });
 
   it("returns 403 when the caller has no provisioned mailbox", async () => {
-    getMailboxesForUser.mockResolvedValue([]);
+    getSendableMailboxes.mockResolvedValue([]);
     const fetchMock = stubRelay(relayOk());
     const res = await makeApp().fetch(
       postBody({

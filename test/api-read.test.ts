@@ -64,6 +64,7 @@ function makeThread(over: Partial<Thread> = {}): Thread {
     snippet: "hello",
     last_message_at: 100,
     last_message_id: "msg-1",
+    assignee_id: null,
     message_count: 1,
     unread: 0,
     created_at: 1,

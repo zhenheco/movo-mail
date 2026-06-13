@@ -14,7 +14,17 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import { getMailboxesForUser } from "../db";
+import { getMailboxesForUser, getSendableMailboxes } from "../db";
+import type { Mailbox } from "../types";
+
+function toMailboxWire(m: Mailbox) {
+  return {
+    id: m.id,
+    address: m.address,
+    displayName: m.display_name ?? null,
+    kind: m.kind,
+  };
+}
 
 /** Build the /mailboxes sub-router. */
 export function mailboxRoutes(): Hono<AccessEnv> {
@@ -25,16 +35,21 @@ export function mailboxRoutes(): Hono<AccessEnv> {
     try {
       const boxes = await getMailboxesForUser(c.env, user.email);
       return c.json({
-        mailboxes: boxes.map((m) => ({
-          id: m.id,
-          address: m.address,
-          displayName: m.display_name ?? null,
-          kind: m.kind,
-        })),
+        mailboxes: boxes.map(toMailboxWire),
       });
     } catch {
       // db guard() already logs detail; surface a friendly, render-safe message.
       return c.json({ error: "Unable to load mailboxes." }, 500);
+    }
+  });
+
+  app.get("/mailboxes/sendable", async (c) => {
+    const user = c.get("user");
+    try {
+      const boxes = await getSendableMailboxes(c.env, user);
+      return c.json({ mailboxes: boxes.map(toMailboxWire) });
+    } catch {
+      return c.json({ error: "Unable to load sendable mailboxes." }, 500);
     }
   });
 

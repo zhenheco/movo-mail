@@ -132,6 +132,7 @@ export interface Thread {
    * thread that has no messages yet.
    */
   last_message_id: string | null;
+  assignee_id: string | null;
   message_count: number;
   /** 0/1 boolean as stored in SQLite. */
   unread: number;

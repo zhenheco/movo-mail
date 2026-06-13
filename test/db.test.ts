@@ -40,6 +40,7 @@ import {
   getAuditLog,
   getMailboxByAddress,
   getMailboxesForUser,
+  getSendableMailboxes,
   getThreadsForOwner,
   searchMessagesForOwner,
   type OutboundMessageInput,
@@ -156,13 +157,14 @@ async function seedMailbox(
   id: string,
   address: string,
   ownerId: string | null = null,
+  kind: "personal" | "shared" = "personal",
 ): Promise<void> {
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO mailboxes (id, address, display_name, owner_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO mailboxes (id, address, display_name, owner_id, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, address, null, ownerId, now, now)
+    .bind(id, address, null, ownerId, kind, now, now)
     .run();
 }
 
@@ -258,6 +260,47 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(
         await getMailboxesForUser(env, "ghost' OR '1'='1"),
       ).toHaveLength(0);
+    });
+  });
+
+  describe("getSendableMailboxes", () => {
+    it("returns owned personal mailboxes plus all shared mailboxes", async () => {
+      await seedUser(env, "u-kee", "kee@movo.com.my");
+      await seedUser(env, "u-priss", "priss@movo.com.my");
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await seedMailbox(env, "mb-priss", "priss@movo.com.my", "u-priss");
+      await seedMailbox(env, "mb-hello", "hello@movo.com.my", null, "shared");
+      await seedMailbox(env, "mb-service", "service@movo.com.my", null, "shared");
+
+      const mailboxes = await getSendableMailboxes(env, {
+        sub: "access-sub",
+        email: "kee@movo.com.my",
+      });
+
+      expect(mailboxes.map((m) => m.address)).toEqual([
+        "hello@movo.com.my",
+        "kee@movo.com.my",
+        "service@movo.com.my",
+      ]);
+      expect(mailboxes.map((m) => m.kind)).toEqual([
+        "shared",
+        "personal",
+        "shared",
+      ]);
+    });
+
+    it("does not pollute getMailboxesForUser with shared mailboxes", async () => {
+      await seedUser(env, "u-kee", "kee@movo.com.my");
+      await seedUser(env, "u-priss", "priss@movo.com.my");
+      await seedMailbox(env, "mb-kee", "kee@movo.com.my", "u-kee");
+      await seedMailbox(env, "mb-priss", "priss@movo.com.my", "u-priss");
+      await seedMailbox(env, "mb-hello", "hello@movo.com.my", null, "shared");
+      await seedMailbox(env, "mb-service", "service@movo.com.my", null, "shared");
+
+      const mailboxes = await getMailboxesForUser(env, "kee@movo.com.my");
+
+      expect(mailboxes.map((m) => m.address)).toEqual(["kee@movo.com.my"]);
+      expect(mailboxes[0]?.kind).toBe("personal");
     });
   });
 
@@ -685,6 +728,44 @@ describe("db (real SQL via node:sqlite)", () => {
   });
 
   describe("insertOutboundMessage", () => {
+    async function threadAssignee(threadId: string): Promise<string | null> {
+      const row = await env.DB.prepare(
+        `SELECT assignee_id FROM threads WHERE id = ?`,
+      )
+        .bind(threadId)
+        .first<{ assignee_id: string | null }>();
+      return row?.assignee_id ?? null;
+    }
+
+    async function latestThreadId(mailboxId: string): Promise<string> {
+      const threads = await getThreads(env, mailboxId);
+      expect(threads).toHaveLength(1);
+      return threads[0]!.id;
+    }
+
+    function outboundInput(
+      over: Partial<OutboundMessageInput> = {},
+    ): OutboundMessageInput {
+      return {
+        mailboxId: "mb-1",
+        messageId: "<out-1@movo.com.my>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["alice@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Brand new",
+        text: "Hello from scratch",
+        html: null,
+        snippet: "Hello from scratch",
+        hasAttachments: false,
+        date: 1_700_000_960_000,
+        ...over,
+      };
+    }
+
     it("stores an outbound copy under an existing thread (read, not unread)", async () => {
       const tid = await upsertThread(env, {
         mailboxId: "mb-1",
@@ -752,6 +833,65 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(loaded?.messages).toHaveLength(1);
       expect(loaded?.messages[0]?.id).toBe(mid);
       expect(loaded?.messages[0]?.direction).toBe("outbound");
+    });
+
+    it("persists the sender as assignee on a new shared-mailbox thread", async () => {
+      await seedUser(env, "u-sender", "sender@movo.com.my");
+      await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+
+      await insertOutboundMessage(env, {
+        ...outboundInput({
+          mailboxId: "mb-shared",
+          fromAddress: "hello@movo.com.my",
+        }),
+        assigneeId: "u-sender",
+      });
+
+      const threadId = await latestThreadId("mb-shared");
+      expect(await threadAssignee(threadId)).toBe("u-sender");
+    });
+
+    it("does not overwrite an existing thread assignee on reply", async () => {
+      await seedUser(env, "u-sender", "sender@movo.com.my");
+      await seedUser(env, "u-existing", "existing@movo.com.my");
+      await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+      const now = Date.now();
+      await env.DB.prepare(
+        `INSERT INTO threads
+           (id, mailbox_id, subject, snippet, last_message_at, message_count,
+            unread, assignee_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)`,
+      )
+        .bind(
+          "thr-assigned",
+          "mb-shared",
+          "Existing",
+          "previous",
+          1_700_000_000_000,
+          "u-existing",
+          now,
+          now,
+        )
+        .run();
+
+      await insertOutboundMessage(env, {
+        ...outboundInput({
+          threadId: "thr-assigned",
+          mailboxId: "mb-shared",
+          fromAddress: "hello@movo.com.my",
+          subject: "Re: Existing",
+        }),
+        assigneeId: "u-sender",
+      });
+
+      expect(await threadAssignee("thr-assigned")).toBe("u-existing");
+    });
+
+    it("leaves a new personal-mailbox thread unassigned when no assignee is provided", async () => {
+      await insertOutboundMessage(env, outboundInput());
+
+      const threadId = await latestThreadId("mb-1");
+      expect(await threadAssignee(threadId)).toBeNull();
     });
   });
 

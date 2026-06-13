@@ -13,6 +13,7 @@
 
 import { v4 as uuid } from "uuid";
 import type {
+  AccessUser,
   Env,
   Thread,
   Message,
@@ -81,6 +82,7 @@ export interface OutboundMessageInput {
   snippet: string | null;
   hasAttachments: boolean;
   date: number;
+  assigneeId?: string | null;
 }
 
 /** Fields used to find-or-create the thread for a message. */
@@ -93,6 +95,7 @@ export interface UpsertThreadInput {
   lastMessageAt: number;
   /** Whether the latest message is unread (inbound). */
   unread: boolean;
+  assigneeId?: string | null;
 }
 
 /** Fields used to write a send-log row. */
@@ -190,6 +193,7 @@ export async function getThreads(
     const { results } = await env.DB.prepare(
       `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
               t.message_count, t.unread, t.created_at, t.updated_at,
+              t.assignee_id,
               (SELECT m.id FROM messages m
                  WHERE m.thread_id = t.id
                  ORDER BY m.date DESC, m.rowid DESC
@@ -220,6 +224,7 @@ export async function getThreadsForOwner(
     const { results } = await env.DB.prepare(
       `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
               t.message_count, t.unread, t.created_at, t.updated_at,
+              t.assignee_id,
               (SELECT m.id FROM messages m
                  WHERE m.thread_id = t.id
                  ORDER BY m.date DESC, m.rowid DESC
@@ -245,6 +250,7 @@ export async function getThread(
     const thread = await env.DB.prepare(
       `SELECT t.id, t.mailbox_id, t.subject, t.snippet, t.last_message_at,
               t.message_count, t.unread, t.created_at, t.updated_at,
+              t.assignee_id,
               (SELECT m.id FROM messages m
                  WHERE m.thread_id = t.id
                  ORDER BY m.date DESC, m.rowid DESC
@@ -429,6 +435,27 @@ export async function getMailboxesForUser(
   });
 }
 
+/** List mailboxes the user may send from: owned personal plus all shared. */
+export async function getSendableMailboxes(
+  env: Env,
+  user: AccessUser,
+): Promise<Mailbox[]> {
+  return guard("getSendableMailboxes", async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT m.id, m.address, m.display_name, m.owner_id, m.kind, m.created_at,
+              m.updated_at
+         FROM mailboxes m
+         LEFT JOIN users u ON u.id = m.owner_id
+        WHERE m.kind = 'shared'
+           OR (m.kind = 'personal' AND u.email = ?)
+        ORDER BY m.address ASC`,
+    )
+      .bind(normalizeEmail(user.email))
+      .all<Mailbox>();
+    return (results ?? []).map((r) => ({ ...r }));
+  });
+}
+
 /** Resolve a user (incl. role) by their Access identity email. */
 export async function getUserByEmail(
   env: Env,
@@ -605,8 +632,8 @@ export async function upsertThread(
     await env.DB.prepare(
       `INSERT INTO threads
          (id, mailbox_id, subject, snippet, last_message_at, message_count,
-          unread, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          unread, assignee_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -615,6 +642,7 @@ export async function upsertThread(
         input.snippet,
         input.lastMessageAt,
         bool(input.unread),
+        input.assigneeId ?? null,
         now,
         now,
       )
@@ -763,6 +791,7 @@ export async function insertOutboundMessage(
       lastMessageAt: msg.date,
       // Outbound mail is authored by the operator → not unread.
       unread: false,
+      assigneeId: msg.assigneeId ?? null,
     });
 
     await env.DB.prepare(

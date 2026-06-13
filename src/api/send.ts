@@ -26,7 +26,8 @@ import type {
 import { sendViaCfEmail, CfEmailError } from "../lib/cfemail";
 import {
   getThread,
-  getMailboxesForUser,
+  getSendableMailboxes,
+  getUserByEmail,
   insertOutboundMessage,
   insertSendLog,
   insertAudit,
@@ -282,26 +283,26 @@ export function sendRoutes(): Hono<AccessEnv> {
       return c.json({ error: validated.error }, 400);
     }
 
-    // Resolve the caller's owned mailbox; `from` is forced to this address.
-    let owned: Mailbox[];
+    // Resolve the caller's sendable mailboxes; `from` is forced to the row.
+    let sendable: Mailbox[];
     try {
-      owned = await getMailboxesForUser(c.env, user.email);
+      sendable = await getSendableMailboxes(c.env, user);
     } catch {
       return c.json({ error: "Unable to resolve your mailbox." }, 500);
     }
-    if (owned.length === 0) {
+    if (sendable.length === 0) {
       return c.json({ error: "No mailbox is provisioned for this account." }, 403);
     }
 
     let mailbox: Mailbox;
     if (validated.mailboxId) {
-      const found = owned.find((m) => m.id === validated.mailboxId);
+      const found = sendable.find((m) => m.id === validated.mailboxId);
       if (!found) {
         return c.json({ error: "You do not own that mailbox." }, 403);
       }
       mailbox = found;
-    } else if (owned.length === 1) {
-      mailbox = owned[0]!;
+    } else if (sendable.length === 1) {
+      mailbox = sendable[0]!;
     } else {
       return c.json(
         { error: "mailboxId is required when you own multiple mailboxes." },
@@ -335,6 +336,18 @@ export function sendRoutes(): Hono<AccessEnv> {
       validated.threadId,
       mailbox,
     );
+    let assigneeId: string | null = null;
+    if (thread === null && mailbox.kind === "shared") {
+      try {
+        const dbUser = await getUserByEmail(c.env, user.email);
+        assigneeId = dbUser?.id ?? null;
+      } catch {
+        return c.json({ error: "Unable to resolve your user." }, 500);
+      }
+      if (!assigneeId) {
+        return c.json({ error: "Unable to resolve your user." }, 500);
+      }
+    }
 
     const idempotencyKey = crypto.randomUUID();
     const localMessageId = `<${idempotencyKey}@movo.com.my>`;
@@ -450,6 +463,7 @@ export function sendRoutes(): Hono<AccessEnv> {
         snippet: makeSnippet(validated.text, validated.html),
         hasAttachments: false,
         date: Date.now(),
+        ...(assigneeId ? { assigneeId } : {}),
       });
 
       await insertSendLog(c.env, {
