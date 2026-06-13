@@ -70,26 +70,47 @@ export function isUnclaimedShared(
 }
 
 /**
- * Pick the ACTIVE mailbox id from the caller's owned set, for the multi-mailbox
- * switcher. Precedence (only ids actually owned are eligible, since the read API
- * scopes to owned mailboxes anyway; the ALL_MAILBOXES sentinel is eligible only
- * when there is a real choice, i.e. >1 owned):
- *   1. `override` — the ?mailbox= query / VITE_DEFAULT_MAILBOX, if owned (or ALL).
- *   2. `stored`   — the last switcher choice (localStorage), if owned (or ALL).
- *   3. the first owned mailbox.
- * Returns null only when the caller owns no mailboxes.
+ * Mailboxes shown as individual options in the switcher: the caller's own
+ * personal mailboxes PLUS every shared mailbox in scope (shared mailboxes are
+ * readable by any authenticated user — the backend scopes which THREADS show
+ * via the visible-thread predicate). Shared mailboxes used to be filtered out
+ * here, leaving them reachable only through the unified "All" view.
+ */
+export function switcherMailboxes(
+  mailboxes: MailboxSummary[],
+): MailboxSummary[] {
+  return mailboxes.filter(
+    (m) => m.kind === "personal" || m.kind === "shared",
+  );
+}
+
+/**
+ * Pick the ACTIVE mailbox id for the multi-mailbox switcher.
+ *
+ * `ownedIds` are the personal mailboxes the caller owns; `selectableIds` is the
+ * superset the switcher can target (owned personal + every shared mailbox).
+ * Precedence:
+ *   1. `override` — the ?mailbox= query / VITE_DEFAULT_MAILBOX, if selectable (or ALL).
+ *   2. `stored`   — the last switcher choice (localStorage), if selectable (or ALL).
+ *   3. the first OWNED mailbox (default landing is always a personal inbox,
+ *      never a shared one).
+ * The ALL_MAILBOXES sentinel is eligible only when there is a real choice, i.e.
+ * more than one selectable mailbox (a single owned personal + a shared one
+ * counts). Returns null only when the caller owns no mailboxes.
  */
 export function resolveActiveMailboxId(
   ownedIds: string[],
+  selectableIds: string[],
   override: string | null,
   stored: string | null,
 ): string | null {
   if (ownedIds.length === 0) {
     return null;
   }
-  const allEligible = ownedIds.length > 1;
+  const allEligible = selectableIds.length > 1;
   const accepts = (id: string | null): boolean =>
-    id != null && ((id === ALL_MAILBOXES && allEligible) || ownedIds.includes(id));
+    id != null &&
+    ((id === ALL_MAILBOXES && allEligible) || selectableIds.includes(id));
 
   if (accepts(override)) {
     return override;

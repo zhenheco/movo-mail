@@ -13,7 +13,7 @@ import {
   searchMessages,
   type MailboxSummary,
 } from "../lib/api";
-import { ALL_MAILBOXES, isUnclaimedShared } from "../lib/mailbox";
+import { ALL_MAILBOXES, isUnclaimedShared, switcherMailboxes } from "../lib/mailbox";
 import { useAsync } from "../lib/useAsync";
 import { formatDate } from "../lib/format";
 import { cn } from "../lib/cn";
@@ -67,17 +67,12 @@ export function ThreadList({
     [mailboxes],
   );
 
-  // The switcher navigates between OWNED personal mailboxes plus the unified
-  // "All" view; it never sets an individual SHARED mailbox as the active inbox
-  // (activeId must resolve in the owned set — shared threads surface via "All").
+  // The switcher targets the caller's own personal mailboxes AND every shared
+  // mailbox in scope, plus the unified "All" view. Picking a shared mailbox
+  // scopes the inbox to it (the backend's visible-thread predicate decides
+  // which threads show: admins see all, others see unclaimed + their own).
   const switchableMailboxes = useMemo(
-    () => (mailboxes ?? []).filter((m) => m.kind === "personal"),
-    [mailboxes],
-  );
-  // Any shared mailbox in scope means "All" is meaningful even for a single
-  // personal-mailbox owner, so the switcher must still render for them.
-  const hasShared = useMemo(
-    () => (mailboxes ?? []).some((m) => m.kind === "shared"),
+    () => switcherMailboxes(mailboxes ?? []),
     [mailboxes],
   );
 
@@ -133,10 +128,10 @@ export function ThreadList({
         ) : null}
       </header>
 
-      {/* Mailbox switcher — when there's a real choice: multiple owned
-          mailboxes, or any shared mailbox exists so "All" is meaningful.
-          Options are personal-only; shared inboxes are reached via "All". */}
-      {onSwitchMailbox && (switchableMailboxes.length > 1 || hasShared) ? (
+      {/* Mailbox switcher — rendered when there's a real choice (more than one
+          selectable mailbox across owned personal + shared). Each personal and
+          shared mailbox is an option, plus the unified "All" view. */}
+      {onSwitchMailbox && switchableMailboxes.length > 1 ? (
         <MailboxSwitcher
           mailboxes={switchableMailboxes}
           activeId={mailboxId}

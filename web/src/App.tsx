@@ -95,13 +95,22 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     setSendableBoxes([]);
-    fetchMailboxes()
-      .then((boxes) => {
+    // Resolve against the SENDABLE set (owned personal + every shared mailbox)
+    // so a remembered shared-mailbox selection survives reload. A sendable-fetch
+    // failure degrades to the owned list rather than failing the whole load;
+    // only the owned-mailbox fetch failing surfaces the error state.
+    Promise.all([
+      fetchMailboxes(),
+      fetchSendableMailboxes().catch(() => [] as MailboxSummary[]),
+    ])
+      .then(([boxes, sendableRaw]) => {
         if (cancelled) {
           return;
         }
+        const sendable = sendableRaw.length > 0 ? sendableRaw : boxes;
         const activeId = resolveActiveMailboxId(
           boxes.map((b) => b.id),
+          sendable.map((b) => b.id),
           override,
           readStoredMailboxId(),
         );
@@ -110,18 +119,7 @@ export default function App() {
           return;
         }
         setMailboxState({ status: "ready", boxes, activeId });
-        setSendableBoxes(boxes);
-        fetchSendableMailboxes()
-          .then((sendable) => {
-            if (!cancelled) {
-              setSendableBoxes(sendable.length > 0 ? sendable : boxes);
-            }
-          })
-          .catch(() => {
-            if (!cancelled) {
-              setSendableBoxes(boxes);
-            }
-          });
+        setSendableBoxes(sendable);
       })
       .catch((err: unknown) => {
         if (cancelled) {
@@ -220,7 +218,9 @@ export default function App() {
   const { boxes, activeId } = mailboxState;
   const fromOptions = sendableBoxes.length > 0 ? sendableBoxes : boxes;
   const isAll = activeId === ALL_MAILBOXES;
-  const activeBox = boxes.find((b) => b.id === activeId);
+  // Resolve the active mailbox from the sendable set (owned personal + shared)
+  // so a shared active mailbox yields its own From address, not a personal one.
+  const activeBox = fromOptions.find((b) => b.id === activeId);
   // mailboxId scopes the inbox (the ALL sentinel triggers the unified view in
   // ThreadList). For a NEW message we need a real mailbox to send from, so the
   // unified view defaults composing to the first owned mailbox (Compose still
