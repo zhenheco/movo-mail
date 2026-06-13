@@ -25,9 +25,10 @@ export interface MailboxSwitcherProps {
 
 /** Label for an option: "Display Name <addr>" or just the address. */
 function optionLabel(mailbox: MailboxSummary): string {
-  return mailbox.displayName
+  const label = mailbox.displayName
     ? `${mailbox.displayName} <${mailbox.address}>`
     : mailbox.address;
+  return mailbox.kind === "shared" ? `${label}（共用）` : label;
 }
 
 export function MailboxSwitcher({

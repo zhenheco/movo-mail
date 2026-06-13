@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { resolveActiveMailboxId, ALL_MAILBOXES } from "./mailbox";
+import {
+  resolveActiveMailboxId,
+  ALL_MAILBOXES,
+  isUnclaimedShared,
+} from "./mailbox";
+import type { MailboxSummary } from "./api";
+import type { Thread } from "./types";
 
 describe("resolveActiveMailboxId", () => {
   const owned = ["mb-1", "mb-2", "mb-3"];
@@ -36,6 +42,51 @@ describe("resolveActiveMailboxId", () => {
   it("ignores the ALL sentinel when only one mailbox is owned", () => {
     expect(resolveActiveMailboxId(["mb-1"], ALL_MAILBOXES, ALL_MAILBOXES)).toBe(
       "mb-1",
+    );
+  });
+});
+
+describe("isUnclaimedShared", () => {
+  const mailboxesById: Record<string, MailboxSummary> = {
+    "mb-personal": {
+      id: "mb-personal",
+      address: "me@movo.com.my",
+      displayName: "Me",
+      kind: "personal",
+    },
+    "mb-shared": {
+      id: "mb-shared",
+      address: "service@movo.com.my",
+      displayName: "Service",
+      kind: "shared",
+    },
+  };
+
+  function thread(
+    mailboxId: string,
+    assigneeId: string | null,
+  ): Pick<Thread, "mailbox_id" | "assignee_id"> {
+    return { mailbox_id: mailboxId, assignee_id: assigneeId };
+  }
+
+  it("is true for an unassigned thread in a shared mailbox", () => {
+    expect(isUnclaimedShared(thread("mb-shared", null), mailboxesById)).toBe(
+      true,
+    );
+  });
+
+  it("is false once a shared thread is assigned", () => {
+    expect(isUnclaimedShared(thread("mb-shared", "user-1"), mailboxesById)).toBe(
+      false,
+    );
+  });
+
+  it("is false for unassigned personal or unknown mailboxes", () => {
+    expect(isUnclaimedShared(thread("mb-personal", null), mailboxesById)).toBe(
+      false,
+    );
+    expect(isUnclaimedShared(thread("mb-missing", null), mailboxesById)).toBe(
+      false,
     );
   });
 });

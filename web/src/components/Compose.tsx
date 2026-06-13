@@ -20,6 +20,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Spinner } from "./ui/feedback";
+import { Badge } from "./ui/badge";
 
 export interface ComposeProps {
   /** Fallback From address (used only if the selected mailbox can't resolve). */
@@ -34,6 +35,13 @@ export interface ComposeProps {
 }
 
 type SendPhase = "idle" | "sending" | "error" | "sent";
+
+function fromOptionLabel(mailbox: MailboxSummary): string {
+  const label = mailbox.displayName
+    ? `${mailbox.displayName} <${mailbox.address}>`
+    : mailbox.address;
+  return mailbox.kind === "shared" ? `${label}（共用）` : label;
+}
 
 export function Compose({
   fromAddress,
@@ -161,14 +169,15 @@ export function Compose({
             >
               {fromOptions.map((b) => (
                 <option key={b.id} value={b.id}>
-                  {b.displayName ? `${b.displayName} <${b.address}>` : b.address}
+                  {fromOptionLabel(b)}
                 </option>
               ))}
             </select>
           </label>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="flex items-center gap-1 text-xs text-muted-foreground">
             From <span className="font-medium">{effectiveFromAddress}</span>
+            {fromBox?.kind === "shared" ? <Badge variant="shared">共用</Badge> : null}
           </p>
         )}
 

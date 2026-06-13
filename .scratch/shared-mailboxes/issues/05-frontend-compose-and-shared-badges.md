@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: closed
 Type: feat
 
 # 05 — 前端：寄件選單 + 共用標記 + 未認領狀態

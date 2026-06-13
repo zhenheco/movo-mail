@@ -12,6 +12,7 @@ import {
   ApiError,
   buildQuery,
   createAdminMailbox,
+  fetchSendableMailboxes,
   fetchMailboxes,
   fetchMe,
   fetchThreads,
@@ -168,6 +169,42 @@ describe("api client fetch", () => {
     // Hits the mailbox-listing endpoint under /api.
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/mailboxes",
+      expect.anything(),
+    );
+  });
+
+  it("fetchSendableMailboxes unwraps owned and shared mailboxes from the sendable endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          mailboxes: [
+            {
+              id: "mb-owned",
+              address: "me@movo.com.my",
+              displayName: "Me",
+              kind: "personal",
+            },
+            {
+              id: "mb-shared",
+              address: "service@movo.com.my",
+              displayName: "Service",
+              kind: "shared",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const boxes = await fetchSendableMailboxes();
+
+    expect(boxes.map((m) => [m.id, m.kind])).toEqual([
+      ["mb-owned", "personal"],
+      ["mb-shared", "shared"],
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/mailboxes/sendable",
       expect.anything(),
     );
   });

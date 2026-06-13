@@ -1,3 +1,5 @@
+import type { MailboxSummary } from "./api";
+
 /**
  * Resolve an OVERRIDE mailbox id.
  *
@@ -56,6 +58,16 @@ export function resolveFromAddress(
  * owns more than one mailbox.
  */
 export const ALL_MAILBOXES = "__all__";
+
+export function isUnclaimedShared(
+  thread: { mailbox_id: string; assignee_id: string | null },
+  mailboxesById: Record<string, Pick<MailboxSummary, "kind"> | undefined>,
+): boolean {
+  return (
+    mailboxesById[thread.mailbox_id]?.kind === "shared" &&
+    thread.assignee_id === null
+  );
+}
 
 /**
  * Pick the ACTIVE mailbox id from the caller's owned set, for the multi-mailbox

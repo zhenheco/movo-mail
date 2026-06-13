@@ -181,6 +181,17 @@ export async function fetchMailboxes(): Promise<MailboxSummary[]> {
   return data.mailboxes;
 }
 
+/**
+ * GET /api/mailboxes/sendable — every mailbox the caller may send from:
+ * owned personal mailboxes plus all shared mailboxes.
+ */
+export async function fetchSendableMailboxes(): Promise<MailboxSummary[]> {
+  const data = await request<{ mailboxes: MailboxSummary[] }>(
+    `/mailboxes/sendable`,
+  );
+  return data.mailboxes;
+}
+
 /** GET /api/threads?mailbox=<id> */
 export async function fetchThreads(mailboxId: string): Promise<Thread[]> {
   const data = await request<{ threads: Thread[] }>(

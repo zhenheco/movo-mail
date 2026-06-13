@@ -13,7 +13,7 @@ import {
   searchMessages,
   type MailboxSummary,
 } from "../lib/api";
-import { ALL_MAILBOXES } from "../lib/mailbox";
+import { ALL_MAILBOXES, isUnclaimedShared } from "../lib/mailbox";
 import { useAsync } from "../lib/useAsync";
 import { formatDate } from "../lib/format";
 import { cn } from "../lib/cn";
@@ -21,6 +21,7 @@ import { Input } from "./ui/input";
 import { Button } from "./ui/button";
 import { MailboxSwitcher } from "./MailboxSwitcher";
 import { EmptyState, ErrorState, LoadingState } from "./ui/feedback";
+import { Badge } from "./ui/badge";
 
 export interface ThreadListProps {
   mailboxId: string;
@@ -57,12 +58,26 @@ export function ThreadList({
   // with its source mailbox. Search broadens to all owned mailboxes too.
   const isAll = mailboxId === ALL_MAILBOXES;
 
-  const addressById = useMemo(
+  const mailboxById = useMemo(
     () =>
-      Object.fromEntries((mailboxes ?? []).map((m) => [m.id, m.address])) as Record<
+      Object.fromEntries((mailboxes ?? []).map((m) => [m.id, m])) as Record<
         string,
-        string
+        MailboxSummary
       >,
+    [mailboxes],
+  );
+
+  // The switcher navigates between OWNED personal mailboxes plus the unified
+  // "All" view; it never sets an individual SHARED mailbox as the active inbox
+  // (activeId must resolve in the owned set — shared threads surface via "All").
+  const switchableMailboxes = useMemo(
+    () => (mailboxes ?? []).filter((m) => m.kind === "personal"),
+    [mailboxes],
+  );
+  // Any shared mailbox in scope means "All" is meaningful even for a single
+  // personal-mailbox owner, so the switcher must still render for them.
+  const hasShared = useMemo(
+    () => (mailboxes ?? []).some((m) => m.kind === "shared"),
     [mailboxes],
   );
 
@@ -118,10 +133,12 @@ export function ThreadList({
         ) : null}
       </header>
 
-      {/* Mailbox switcher — only when the user owns more than one mailbox. */}
-      {mailboxes && mailboxes.length > 1 && onSwitchMailbox ? (
+      {/* Mailbox switcher — when there's a real choice: multiple owned
+          mailboxes, or any shared mailbox exists so "All" is meaningful.
+          Options are personal-only; shared inboxes are reached via "All". */}
+      {onSwitchMailbox && (switchableMailboxes.length > 1 || hasShared) ? (
         <MailboxSwitcher
-          mailboxes={mailboxes}
+          mailboxes={switchableMailboxes}
           activeId={mailboxId}
           onSwitch={onSwitchMailbox}
         />
@@ -170,7 +187,7 @@ export function ThreadList({
             selectedThreadId={selectedThreadId}
             onSelectThread={onSelectThread}
             showSource={isAll}
-            addressById={addressById}
+            mailboxById={mailboxById}
           />
         )}
       </div>
@@ -183,14 +200,14 @@ function ThreadRows({
   selectedThreadId,
   onSelectThread,
   showSource,
-  addressById,
+  mailboxById,
 }: {
   state: ReturnType<typeof useAsync<Thread[]>>;
   selectedThreadId: string | null;
   onSelectThread: (thread: Thread) => void;
   /** Unified inbox: show each thread's source-mailbox chip. */
   showSource: boolean;
-  addressById: Record<string, string>;
+  mailboxById: Record<string, MailboxSummary>;
 }) {
   if (state.loading) {
     return <LoadingState label="Loading inbox…" />;
@@ -212,9 +229,10 @@ function ThreadRows({
             onSelect={() => onSelectThread(thread)}
             sourceAddress={
               showSource
-                ? addressById[thread.mailbox_id] ?? null
+                ? mailboxById[thread.mailbox_id]?.address ?? null
                 : null
             }
+            isUnclaimed={isUnclaimedShared(thread, mailboxById)}
           />
         </li>
       ))}
@@ -227,12 +245,14 @@ function ThreadRow({
   selected,
   onSelect,
   sourceAddress,
+  isUnclaimed,
 }: {
   thread: Thread;
   selected: boolean;
   onSelect: () => void;
   /** Source-mailbox address chip (unified inbox); null hides it. */
   sourceAddress: string | null;
+  isUnclaimed: boolean;
 }) {
   const unread = thread.unread === 1;
   return (
@@ -263,6 +283,7 @@ function ThreadRow({
         </span>
       ) : null}
       <div className="flex items-center gap-2">
+        {isUnclaimed ? <Badge variant="unclaimed">未認領</Badge> : null}
         {unread ? (
           <span
             aria-label="Unread"

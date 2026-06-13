@@ -31,6 +31,7 @@ import {
   ApiError,
   fetchMailboxes,
   fetchMe,
+  fetchSendableMailboxes,
   type MailboxSummary,
 } from "./lib/api";
 import { selectionForThread } from "./lib/selection";
@@ -86,12 +87,14 @@ export default function App() {
   const [mailboxState, setMailboxState] = useState<MailboxState>({
     status: "loading",
   });
+  const [sendableBoxes, setSendableBoxes] = useState<MailboxSummary[]>([]);
   // Bump to re-fetch the owned-mailbox list (e.g. after an admin adds the first
   // mailbox from settings while still in the empty state).
   const [mailboxNonce, setMailboxNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setSendableBoxes([]);
     fetchMailboxes()
       .then((boxes) => {
         if (cancelled) {
@@ -107,6 +110,18 @@ export default function App() {
           return;
         }
         setMailboxState({ status: "ready", boxes, activeId });
+        setSendableBoxes(boxes);
+        fetchSendableMailboxes()
+          .then((sendable) => {
+            if (!cancelled) {
+              setSendableBoxes(sendable.length > 0 ? sendable : boxes);
+            }
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setSendableBoxes(boxes);
+            }
+          });
       })
       .catch((err: unknown) => {
         if (cancelled) {
@@ -203,6 +218,7 @@ export default function App() {
   }
 
   const { boxes, activeId } = mailboxState;
+  const fromOptions = sendableBoxes.length > 0 ? sendableBoxes : boxes;
   const isAll = activeId === ALL_MAILBOXES;
   const activeBox = boxes.find((b) => b.id === activeId);
   // mailboxId scopes the inbox (the ALL sentinel triggers the unified view in
@@ -276,7 +292,7 @@ export default function App() {
         onCompose={handleCompose}
         onHome={handleHome}
         onOpenSettings={isAdmin ? () => setShowSettings(true) : undefined}
-        mailboxes={boxes}
+        mailboxes={fromOptions}
         onSwitchMailbox={handleSwitchMailbox}
       />
 
@@ -286,7 +302,7 @@ export default function App() {
           <Compose
             fromAddress={fromAddress}
             initial={compose}
-            fromOptions={boxes}
+            fromOptions={fromOptions}
             onClose={() => setCompose(null)}
             onSent={handleSent}
           />

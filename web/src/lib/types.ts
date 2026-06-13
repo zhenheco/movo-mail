@@ -33,6 +33,7 @@ export interface Thread {
    */
   last_message_id: string | null;
   message_count: number;
+  assignee_id: string | null;
   /** 0/1 boolean as stored in SQLite. */
   unread: number;
   created_at: EpochMs;

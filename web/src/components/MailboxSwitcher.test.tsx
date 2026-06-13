@@ -29,4 +29,26 @@ describe("MailboxSwitcher", () => {
     expect(html).toContain("All mailboxes");
     expect(html).toMatch(/<option[^>]*value="__all__"[^>]*selected/);
   });
+
+  it("marks shared mailbox options without marking personal mailboxes", () => {
+    const html = renderToStaticMarkup(
+      <MailboxSwitcher
+        mailboxes={[
+          boxes[0]!,
+          {
+            id: "mb-shared",
+            address: "service@movo.com.my",
+            displayName: "Service",
+            kind: "shared",
+          },
+        ]}
+        activeId="mb-shared"
+        onSwitch={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Service &lt;service@movo.com.my&gt;（共用）");
+    expect(html).toContain("Sales &lt;sales@movo.com.my&gt;");
+    expect(html).not.toContain("Sales &lt;sales@movo.com.my&gt;（共用）");
+  });
 });
