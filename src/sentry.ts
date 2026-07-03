@@ -13,11 +13,17 @@ const SENSITIVE_HEADER_NAMES = new Set([
   "authorization",
   "cookie",
   "set-cookie",
+  "cf-access-jwt-assertion",
+  "cf-access-authenticated-user-email",
   "cf-connecting-ip",
   "x-forwarded-for",
   "x-real-ip",
+  "x-auth-email",
   "x-api-key",
 ]);
+const URL_HEADER_NAMES = new Set(["referer", "referrer"]);
+const URL_ATTRIBUTE_NAMES = new Set(["url", "url.full", "http.url", "http.target"]);
+const QUERY_ATTRIBUTE_NAMES = new Set(["query", "url.query", "http.query", "query_string"]);
 
 function parseSampleRate(value: string | undefined): number {
   if (!value) {
@@ -41,12 +47,23 @@ function scrubRecordValue(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
         key,
-        SENSITIVE_KEY_PATTERN.test(key) ? "[Filtered]" : scrubRecordValue(entry),
+        scrubRecordEntry(key, entry),
       ]),
     );
   }
 
   return value;
+}
+
+function scrubRecordEntry(key: string, value: unknown): unknown {
+  const normalizedKey = key.toLowerCase();
+  if (SENSITIVE_KEY_PATTERN.test(key) || QUERY_ATTRIBUTE_NAMES.has(normalizedKey)) {
+    return "[Filtered]";
+  }
+  if (typeof value === "string" && URL_ATTRIBUTE_NAMES.has(normalizedKey)) {
+    return scrubRequestUrl(value);
+  }
+  return scrubRecordValue(value);
 }
 
 function scrubRequestUrl(value: string): string {
@@ -68,9 +85,20 @@ function scrubHeaders(headers: Record<string, unknown> | undefined): Record<stri
   return Object.fromEntries(
     Object.entries(headers).map(([key, value]) => [
       key,
-      SENSITIVE_HEADER_NAMES.has(key.toLowerCase()) ? "[Filtered]" : String(value),
+      scrubHeaderValue(key, value),
     ]),
   );
+}
+
+function scrubHeaderValue(key: string, value: unknown): string {
+  const normalizedKey = key.toLowerCase();
+  if (SENSITIVE_HEADER_NAMES.has(normalizedKey) || SENSITIVE_KEY_PATTERN.test(key)) {
+    return "[Filtered]";
+  }
+  if (URL_HEADER_NAMES.has(normalizedKey) && typeof value === "string") {
+    return scrubRequestUrl(value);
+  }
+  return String(value);
 }
 
 export function scrubSentryEvent<T extends Event>(event: T): T {
@@ -78,6 +106,7 @@ export function scrubSentryEvent<T extends Event>(event: T): T {
     request?: Record<string, unknown>;
     extra?: Record<string, unknown>;
     contexts?: Record<string, unknown>;
+    spans?: Array<Record<string, unknown>>;
   };
 
   if (scrubbed.request) {
@@ -98,6 +127,11 @@ export function scrubSentryEvent<T extends Event>(event: T): T {
 
   if (scrubbed.contexts) {
     scrubbed.contexts = scrubRecordValue(scrubbed.contexts) as Event["contexts"];
+  }
+
+  const eventWithSpans = scrubbed as { spans?: unknown[] };
+  if (Array.isArray(eventWithSpans.spans)) {
+    eventWithSpans.spans = eventWithSpans.spans.map(scrubRecordValue);
   }
 
   if (scrubbed.user) {

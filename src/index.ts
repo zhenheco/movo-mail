@@ -34,6 +34,11 @@ app.all("*", async (c) => {
   }
 });
 
+app.onError((err, c) => {
+  Sentry.captureException(err);
+  return c.text("Internal Server Error", 500);
+});
+
 function fetch(
   request: Request,
   env: Env,
