@@ -23,8 +23,16 @@ export interface Env {
   // ── vars (wrangler.toml [vars]) ──
   /** Base URL of the cf-email relay Worker, e.g. https://cf-email.zhenhe-co.workers.dev */
   CF_EMAIL_ENDPOINT: string;
+  /** Sentry environment name for the Worker runtime. */
+  SENTRY_ENVIRONMENT?: string;
+  /** Sentry release id, normally the deployed commit SHA. */
+  SENTRY_RELEASE?: string;
+  /** Sentry tracing sample rate as a string for Wrangler vars compatibility. */
+  SENTRY_TRACES_SAMPLE_RATE?: string;
 
   // ── secrets (wrangler secret put) ──
+  /** Sentry DSN secret. */
+  SENTRY_DSN?: string;
   /** x-api-key for the cf-email relay. */
   CF_EMAIL_API_KEY: string;
   /** Cloudflare Access application AUD tag. */

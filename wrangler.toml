@@ -19,6 +19,8 @@ head_sampling_rate = 1
 
 [vars]
 CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
+SENTRY_ENVIRONMENT = "production"
+SENTRY_TRACES_SAMPLE_RATE = "0.1"
 
 [[d1_databases]]
 binding = "DB"
@@ -43,6 +45,8 @@ binding = "ASSETS"
 
 [env.staging.vars]
 CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
+SENTRY_ENVIRONMENT = "staging"
+SENTRY_TRACES_SAMPLE_RATE = "0.1"
 
 [[env.staging.d1_databases]]
 binding = "DB"
@@ -65,6 +69,8 @@ binding = "ASSETS"
 [env.production]
 [env.production.vars]
 CF_EMAIL_ENDPOINT = "https://cf-email.acejou27.workers.dev"
+SENTRY_ENVIRONMENT = "production"
+SENTRY_TRACES_SAMPLE_RATE = "0.1"
 
 [[env.production.d1_databases]]
 binding = "DB"

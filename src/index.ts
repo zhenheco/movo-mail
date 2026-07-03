@@ -6,6 +6,7 @@
  *   email  — inbound Email Worker handler (delegates to handleInbound)
  */
 
+import * as Sentry from "@sentry/cloudflare";
 import { Hono } from "hono";
 import type { Env } from "./types";
 import type { AccessEnv } from "./middleware/access";
@@ -13,6 +14,7 @@ import { accessAuth } from "./middleware/access";
 import { apiRoutes } from "./api/routes";
 import { handleInbound } from "./email/inbound";
 import { isManagedAddress } from "./db";
+import { buildSentryOptions } from "./sentry";
 
 const app = new Hono<AccessEnv>();
 
@@ -32,13 +34,26 @@ app.all("*", async (c) => {
   }
 });
 
-export default {
+function fetch(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Response | Promise<Response> {
+  return app.fetch(request, env, ctx);
+}
+
+const sentryFetchWorker = Sentry.withSentry<Env>((env) => buildSentryOptions(env), {
+  fetch,
+});
+const sentryFetch = sentryFetchWorker.fetch as unknown as typeof fetch;
+
+const worker = {
   fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext,
   ): Response | Promise<Response> {
-    return app.fetch(request, env, ctx);
+    return sentryFetch(request, env, ctx);
   },
 
   /**
@@ -95,3 +110,5 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+export default worker;
