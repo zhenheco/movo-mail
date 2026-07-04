@@ -34,6 +34,13 @@ interface CfEmailSendBody {
   text?: string;
   idempotencyKey: string;
   headers?: Record<string, string>;
+  attachments?: Array<{
+    filename: string;
+    type: string;
+    content: string;
+    disposition: "attachment" | "inline";
+    contentId?: string;
+  }>;
 }
 
 /** Reduce a list of addresses to the single plain address the relay accepts. */
@@ -76,6 +83,15 @@ export async function sendViaCfEmail(
   if (typeof req.text === "string") body.text = req.text;
   const headers = compactHeaders(req.headers);
   if (headers) body.headers = headers;
+  if (req.attachments && req.attachments.length > 0) {
+    body.attachments = req.attachments.map((att) => ({
+      filename: att.filename,
+      type: att.contentType,
+      content: att.contentBase64,
+      disposition: att.inline ? "inline" : "attachment",
+      ...(att.contentId ? { contentId: att.contentId } : {}),
+    }));
+  }
 
   const url = `${env.CF_EMAIL_ENDPOINT}/send`;
 

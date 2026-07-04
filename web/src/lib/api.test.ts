@@ -26,7 +26,12 @@ import {
   parseRecipientInput,
   replySubject,
 } from "./format";
-import { buildSendRequest, replyDraft } from "./compose";
+import {
+  buildSendRequest,
+  bytesToBase64,
+  estimatedBase64Length,
+  replyDraft,
+} from "./compose";
 import type { MessageWithAttachments } from "./types";
 
 // ── buildQuery ──────────────────────────────────────────────────────────────
@@ -136,6 +141,42 @@ describe("compose helpers", () => {
     });
     expect(plain.headers).toBeUndefined();
     expect(plain.threadId).toBeUndefined();
+  });
+
+  it("buildSendRequest carries outbound attachments", () => {
+    const req = buildSendRequest({
+      fromAddress: "me@movo.com.my",
+      to: [{ address: "client@example.com" }],
+      subject: "Invoice",
+      text: "Attached.",
+      attachments: [
+        {
+          filename: "invoice.txt",
+          contentType: "text/plain",
+          contentBase64: "aGVsbG8=",
+        },
+      ],
+    });
+
+    expect(req.attachments).toEqual([
+      {
+        filename: "invoice.txt",
+        contentType: "text/plain",
+        contentBase64: "aGVsbG8=",
+      },
+    ]);
+  });
+
+  it("bytesToBase64 encodes binary attachment bytes", () => {
+    expect(bytesToBase64(new Uint8Array([0, 255, 16, 32]))).toBe("AP8QIA==");
+  });
+
+  it("estimatedBase64Length matches base64 padding growth", () => {
+    expect(estimatedBase64Length(0)).toBe(0);
+    expect(estimatedBase64Length(1)).toBe(4);
+    expect(estimatedBase64Length(2)).toBe(4);
+    expect(estimatedBase64Length(3)).toBe(4);
+    expect(estimatedBase64Length(4)).toBe(8);
   });
 });
 

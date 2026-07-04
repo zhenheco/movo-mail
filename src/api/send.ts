@@ -20,6 +20,7 @@ import type {
   AccessUser,
   EmailAddress,
   Mailbox,
+  ParsedAttachment,
   SendRequest,
   SendResult,
 } from "../types";
@@ -53,9 +54,13 @@ interface ValidatedBody {
   subject: string;
   text: string | null;
   html: string | null;
+  attachments: ParsedAttachment[];
   threadId: string | null;
   mailboxId: string | null;
 }
+
+const MAX_ATTACHMENT_COUNT = 10;
+const MAX_ATTACHMENT_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
 /** Parse + validate the POST body. Returns an error string when invalid. */
 function validate(raw: unknown): ValidatedBody | { error: string } {
@@ -74,6 +79,10 @@ function validate(raw: unknown): ValidatedBody | { error: string } {
   if (text === null && html === null) {
     return { error: "a text or html body is required" };
   }
+  const attachments = parseAttachments(b.attachments);
+  if ("error" in attachments) {
+    return attachments;
+  }
 
   return {
     to,
@@ -82,6 +91,7 @@ function validate(raw: unknown): ValidatedBody | { error: string } {
     subject: b.subject,
     text,
     html,
+    attachments,
     threadId:
       typeof b.threadId === "string" && b.threadId.length > 0
         ? b.threadId
@@ -119,6 +129,67 @@ function parseAddresses(input: unknown): EmailAddress[] {
 
 function isEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isBase64(value: string): boolean {
+  return value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+}
+
+function decodeBase64(value: string): Uint8Array | null {
+  if (!isBase64(value)) return null;
+  try {
+    const decoded = atob(value);
+    const bytes = new Uint8Array(decoded.length);
+    for (let i = 0; i < decoded.length; i += 1) {
+      bytes[i] = decoded.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function parseAttachments(input: unknown): ParsedAttachment[] | { error: string } {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) return { error: "attachments must be an array" };
+  if (input.length > MAX_ATTACHMENT_COUNT) return { error: "too many attachments" };
+
+  let total = 0;
+  const out: ParsedAttachment[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") return { error: "invalid attachment" };
+    const raw = item as Record<string, unknown>;
+    const filename =
+      typeof raw.filename === "string" && raw.filename.trim().length > 0
+        ? raw.filename.trim()
+        : "";
+    const contentType =
+      typeof raw.contentType === "string" && raw.contentType.trim().length > 0
+        ? raw.contentType.trim()
+        : "application/octet-stream";
+    const contentBase64 =
+      typeof raw.contentBase64 === "string" ? raw.contentBase64.trim() : "";
+    if (!filename || !contentBase64 || !isBase64(contentBase64)) {
+      return { error: "invalid attachment" };
+    }
+    total += contentBase64.length;
+    if (total > MAX_ATTACHMENT_PAYLOAD_BYTES) {
+      return { error: "attachments exceed the 5 MiB email limit" };
+    }
+    const content = decodeBase64(contentBase64);
+    if (!content) return { error: "invalid attachment" };
+    out.push({
+      filename,
+      contentType,
+      contentId:
+        typeof raw.contentId === "string" && raw.contentId.trim().length > 0
+          ? raw.contentId.trim()
+          : null,
+      inline: raw.inline === true,
+      content,
+    });
+  }
+  return out;
 }
 
 /** A short plaintext preview for the stored outbound copy. */
@@ -177,7 +248,7 @@ async function deriveThreading(
   return { inReplyTo, references, thread: loaded };
 }
 
-/** Build a minimal RFC-822 .eml for archival to R2 (no attachments in v1). */
+/** Build a minimal RFC-822 .eml body archive; attachments are stored separately. */
 function buildEml(
   req: SendRequest,
   messageId: string,
@@ -201,6 +272,51 @@ function buildEml(
   lines.push("");
   lines.push(req.html ?? req.text ?? "");
   return lines.join("\r\n");
+}
+
+function bytesToBase64(content: ArrayBuffer | Uint8Array): string {
+  const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    const chunk = bytes.subarray(i, i + 0x8000);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function toOutboundAttachments(
+  attachments: ParsedAttachment[],
+): SendRequest["attachments"] {
+  if (attachments.length === 0) return undefined;
+  return attachments.map((att) => ({
+    filename: att.filename,
+    contentType: att.contentType ?? "application/octet-stream",
+    contentBase64: bytesToBase64(att.content),
+    ...(att.contentId ? { contentId: att.contentId } : {}),
+    ...(att.inline ? { inline: true } : {}),
+  }));
+}
+
+async function archiveAttachments(
+  env: Env,
+  messageId: string,
+  attachments: ParsedAttachment[],
+): Promise<ParsedAttachment[]> {
+  const archived: ParsedAttachment[] = [];
+  for (let i = 0; i < attachments.length; i += 1) {
+    const att = attachments[i]!;
+    try {
+      await env.MAIL_R2.put(`att/${messageId}/${archived.length}`, att.content, {
+        httpMetadata: {
+          contentType: att.contentType ?? "application/octet-stream",
+        },
+      });
+      archived.push(att);
+    } catch {
+      // Best-effort sent-copy archival; the relay already accepted the email.
+    }
+  }
+  return archived;
 }
 
 /**
@@ -385,6 +501,9 @@ export function sendRoutes(): Hono<AccessEnv> {
       subject: validated.subject,
       ...(validated.text !== null ? { text: validated.text } : {}),
       ...(validated.html !== null ? { html: validated.html } : {}),
+      ...(validated.attachments.length > 0
+        ? { attachments: toOutboundAttachments(validated.attachments) }
+        : {}),
       idempotencyKey,
       ...(thread ? { threadId: thread.id } : {}),
       mailboxId: mailbox.id,
@@ -454,8 +573,14 @@ export function sendRoutes(): Hono<AccessEnv> {
     // ── success: persist message + send_log + archive .eml ────────────────
     let messageRowId: string | null = null;
     try {
+      const outboundMessageId = crypto.randomUUID();
       const eml = buildEml(sendReq, localMessageId, inReplyTo, references);
-      const r2RawKey = `msg/out/${idempotencyKey}.eml`;
+      const r2RawKey = `msg/${outboundMessageId}.eml`;
+      const archivedAttachments = await archiveAttachments(
+        c.env,
+        outboundMessageId,
+        validated.attachments,
+      );
       try {
         await c.env.MAIL_R2.put(r2RawKey, eml, {
           httpMetadata: { contentType: "message/rfc822" },
@@ -465,6 +590,7 @@ export function sendRoutes(): Hono<AccessEnv> {
       }
 
       messageRowId = await insertOutboundMessage(c.env, {
+        id: outboundMessageId,
         // Reply → attach to the existing thread; brand-new send → omit so the
         // data layer mints a real thread row (avoids a phantom-thread FK error
         // that would silently drop the persisted sent copy).
@@ -482,7 +608,8 @@ export function sendRoutes(): Hono<AccessEnv> {
         text: validated.text,
         html: validated.html,
         snippet: makeSnippet(validated.text, validated.html),
-        hasAttachments: false,
+        hasAttachments: archivedAttachments.length > 0,
+        attachments: archivedAttachments,
         date: Date.now(),
         ...(assigneeId ? { assigneeId } : {}),
       });

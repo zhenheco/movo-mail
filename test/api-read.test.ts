@@ -13,7 +13,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Hono } from "hono";
 import type { AccessEnv } from "../src/middleware/access";
-import type { Env, AccessUser, Thread, Message, Mailbox } from "../src/types";
+import type {
+  Env,
+  AccessUser,
+  Thread,
+  Message,
+  Mailbox,
+  Attachment,
+} from "../src/types";
 import type { MessageWithAttachments } from "../src/db";
 
 // ── Mock the db contract ──────────────────────────────────────────────────
@@ -24,6 +31,7 @@ vi.mock("../src/db", () => ({
   getThreadsForOwner: vi.fn(),
   canUserReadThread: vi.fn(),
   getMessage: vi.fn(),
+  getAttachment: vi.fn(),
   getMailboxById: vi.fn(),
   searchMessages: vi.fn(),
   searchMessagesForOwner: vi.fn(),
@@ -39,6 +47,7 @@ import {
   getThreadsForOwner,
   canUserReadThread,
   getMessage,
+  getAttachment,
   getMailboxById,
   searchMessages,
   searchMessagesForOwner,
@@ -54,6 +63,7 @@ const mGetVisibleThreadsForUser = vi.mocked(getVisibleThreadsForUser);
 const mGetThreadsForOwner = vi.mocked(getThreadsForOwner);
 const mCanUserReadThread = vi.mocked(canUserReadThread);
 const mGetMessage = vi.mocked(getMessage);
+const mGetAttachment = vi.mocked(getAttachment);
 const mGetMailboxById = vi.mocked(getMailboxById);
 const mSearchMessages = vi.mocked(searchMessages);
 const mSearchMessagesForOwner = vi.mocked(searchMessagesForOwner);
@@ -131,6 +141,21 @@ function makeMessage(
   };
 }
 
+function makeAttachment(over: Partial<Attachment> = {}): Attachment {
+  return {
+    id: "att-1",
+    message_id: "msg-1",
+    filename: "invoice.txt",
+    content_type: "text/plain",
+    size_bytes: 5,
+    content_id: null,
+    inline: 0,
+    r2_key: "att/msg-1/0",
+    created_at: 1,
+    ...over,
+  };
+}
+
 /** A minimal fake R2 bucket whose `get` returns null unless overridden. */
 function fakeEnv(over: Partial<Env> = {}): Env {
   const base = {
@@ -164,6 +189,7 @@ beforeEach(() => {
   mGetMailboxesForUser.mockResolvedValue([OWNED_MAILBOX]);
   mGetMailboxById.mockResolvedValue(null);
   mCanUserReadThread.mockResolvedValue(true);
+  mGetAttachment.mockResolvedValue(null);
   mGetUserByEmail.mockResolvedValue({
     id: "user-alice",
     email: USER.email,
@@ -239,6 +265,75 @@ describe("GET /threads", () => {
     mGetThreads.mockRejectedValue(new Error("db down"));
     const res = await dispatch("/threads?mailbox=mb-alice");
     expect(res.status).toBe(500);
+  });
+});
+
+// ── GET /attachment/:id ────────────────────────────────────────────────────
+describe("GET /attachment/:id", () => {
+  it("downloads an attachment only after checking thread visibility", async () => {
+    mGetAttachment.mockResolvedValue({
+      ...makeAttachment(),
+      thread_id: "th-1",
+    });
+    const r2Get = vi.fn().mockResolvedValue({
+      body: new Blob(["hello"]).stream(),
+      writeHttpMetadata: (headers: Headers) => {
+        headers.set("Content-Type", "text/plain");
+      },
+    });
+
+    const res = await dispatch(
+      "/attachment/att-1",
+      fakeEnv({ MAIL_R2: { get: r2Get } as unknown as Env["MAIL_R2"] }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("hello");
+    expect(mCanUserReadThread).toHaveBeenCalledWith(expect.anything(), "th-1", {
+      userId: "user-alice",
+      isAdmin: false,
+    });
+    expect(res.headers.get("Content-Disposition")).toContain(
+      'filename="invoice.txt"',
+    );
+  });
+
+  it("downloads attachments with non-ASCII filenames", async () => {
+    mGetAttachment.mockResolvedValue({
+      ...makeAttachment({ filename: "發票.pdf" }),
+      thread_id: "th-1",
+    });
+    const r2Get = vi.fn().mockResolvedValue({
+      body: new Blob(["pdf"]).stream(),
+      writeHttpMetadata: () => undefined,
+    });
+
+    const res = await dispatch(
+      "/attachment/att-1",
+      fakeEnv({ MAIL_R2: { get: r2Get } as unknown as Env["MAIL_R2"] }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Disposition")).toContain(
+      "filename*=UTF-8''%E7%99%BC%E7%A5%A8.pdf",
+    );
+  });
+
+  it("404s without reading R2 when the user cannot read the thread", async () => {
+    mGetAttachment.mockResolvedValue({
+      ...makeAttachment(),
+      thread_id: "th-1",
+    });
+    mCanUserReadThread.mockResolvedValue(false);
+    const r2Get = vi.fn();
+
+    const res = await dispatch(
+      "/attachment/att-1",
+      fakeEnv({ MAIL_R2: { get: r2Get } as unknown as Env["MAIL_R2"] }),
+    );
+
+    expect(res.status).toBe(404);
+    expect(r2Get).not.toHaveBeenCalled();
   });
 });
 

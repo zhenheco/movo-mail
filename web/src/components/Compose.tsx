@@ -13,7 +13,14 @@
 import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ComposeDraft } from "../lib/compose";
-import { buildSendRequest } from "../lib/compose";
+import {
+  MAX_ATTACHMENT_COUNT,
+  MAX_ATTACHMENT_PAYLOAD_BYTES,
+  buildSendRequest,
+  estimatedBase64Length,
+  fileToAttachment,
+} from "../lib/compose";
+import type { OutboundAttachment } from "../lib/types";
 import { aiDraft, sendMessage, type MailboxSummary } from "../lib/api";
 import { isLikelyEmail, parseRecipientInput } from "../lib/format";
 import { Button } from "./ui/button";
@@ -83,6 +90,10 @@ export function Compose({
   const [to, setTo] = useState(initial.to); // recipient line (raw string)
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
+  const [attachments, setAttachments] = useState<OutboundAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   // Which owned mailbox sends. A reply is locked to the thread's mailbox
   // (initial.mailboxId); a new message defaults to it, else the first owned.
   const [fromId, setFromId] = useState(
@@ -104,7 +115,11 @@ export function Compose({
   const hasValidRecipient =
     recipients.length > 0 && recipients.every((r) => isLikelyEmail(r.address));
   const canSend =
-    hasValidRecipient && subject.trim().length > 0 && sendPhase !== "sending";
+    hasValidRecipient &&
+    subject.trim().length > 0 &&
+    sendPhase !== "sending" &&
+    !attachmentBusy &&
+    !attachmentError;
 
   async function handleAiDraft() {
     if (!initial.threadId) {
@@ -148,6 +163,7 @@ export function Compose({
         to: recipients,
         subject,
         text: body,
+        attachments,
         threadId: initial.threadId,
         // Send from the selected mailbox; the server re-derives the From address
         // from this id (a reply stays locked to its thread's mailbox).
@@ -164,6 +180,55 @@ export function Compose({
         err instanceof Error ? err.message : "Failed to send. Please try again.",
       );
     }
+  }
+
+  async function handleFiles(files: FileList | null) {
+    setAttachmentError(null);
+    setAttachmentBusy(false);
+    if (!files || files.length === 0) {
+      setAttachments([]);
+      return;
+    }
+    const selected = Array.from(files);
+    if (selected.length > MAX_ATTACHMENT_COUNT) {
+      setAttachments([]);
+      setAttachmentError(`Attach up to ${MAX_ATTACHMENT_COUNT} files.`);
+      clearAttachmentInput();
+      return;
+    }
+    const estimatedPayload = selected.reduce(
+      (total, file) => total + estimatedBase64Length(file.size),
+      0,
+    );
+    if (estimatedPayload > MAX_ATTACHMENT_PAYLOAD_BYTES) {
+      setAttachments([]);
+      setAttachmentError("Attachments must be 5 MiB or less.");
+      clearAttachmentInput();
+      return;
+    }
+    setAttachmentBusy(true);
+    try {
+      setAttachments(await Promise.all(selected.map(fileToAttachment)));
+    } catch {
+      setAttachments([]);
+      setAttachmentError("Could not read the selected attachment.");
+      clearAttachmentInput();
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  function clearAttachmentInput() {
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
+    }
+  }
+
+  function clearAttachments() {
+    setAttachments([]);
+    setAttachmentError(null);
+    setAttachmentBusy(false);
+    clearAttachmentInput();
   }
 
   return (
@@ -248,6 +313,48 @@ export function Compose({
           rows={6}
         />
 
+        <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs">
+          <span className="truncate text-muted-foreground">
+            {attachments.length > 0
+              ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"} selected`
+              : attachmentBusy
+                ? "Reading attachments..."
+              : "Attach files"}
+          </span>
+          <Input
+            ref={attachmentInputRef}
+            type="file"
+            multiple
+            className="max-w-48 text-xs"
+            onChange={(e) => void handleFiles(e.currentTarget.files)}
+          />
+        </label>
+
+        {attachments.length > 0 ? (
+          <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-muted/30 px-3 py-2">
+            <ul className="min-w-0 flex-1 space-y-1 text-xs text-muted-foreground">
+              {attachments.map((att, index) => (
+                <li
+                  key={`${att.filename}:${index}`}
+                  className="truncate"
+                  title={att.filename}
+                >
+                  {att.filename}
+                </li>
+              ))}
+            </ul>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={clearAttachments}
+              className="h-7 px-2 text-xs"
+            >
+              Clear
+            </Button>
+          </div>
+        ) : null}
+
         {aiError ? (
           <p role="alert" className="text-xs text-red-600">
             {aiError}
@@ -256,6 +363,11 @@ export function Compose({
         {sendError ? (
           <p role="alert" className="text-xs text-red-600">
             {sendError}
+          </p>
+        ) : null}
+        {attachmentError ? (
+          <p role="alert" className="text-xs text-red-600">
+            {attachmentError}
           </p>
         ) : null}
         {sendPhase === "sent" ? (

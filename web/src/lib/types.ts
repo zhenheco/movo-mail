@@ -80,6 +80,14 @@ export interface Attachment {
   created_at: EpochMs;
 }
 
+export interface OutboundAttachment {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+  contentId?: string;
+  inline?: boolean;
+}
+
 /** A message plus its attachments, as returned by GET /api/message/:id. */
 export interface MessageWithAttachments extends Message {
   attachments: Attachment[];
@@ -123,6 +131,7 @@ export interface SendRequest {
   subject: string;
   text?: string;
   html?: string;
+  attachments?: OutboundAttachment[];
   headers?: Record<string, string>;
   idempotencyKey?: string;
   threadId?: string;
