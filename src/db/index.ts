@@ -25,6 +25,7 @@ import type {
   MailboxKind,
   User,
   UserRole,
+  ParsedAttachment,
   ParsedInbound,
   SendStatus,
 } from "../types";
@@ -54,6 +55,10 @@ export interface MessageWithAttachments extends Message {
   attachments: Attachment[];
 }
 
+export interface AttachmentWithThread extends Attachment {
+  thread_id: string;
+}
+
 /** A thread together with its ordered messages (oldest → newest). */
 export interface ThreadWithMessages extends Thread {
   messages: MessageWithAttachments[];
@@ -81,6 +86,8 @@ export interface OutboundMessageInput {
   html: string | null;
   snippet: string | null;
   hasAttachments: boolean;
+  id?: string;
+  attachments?: ParsedAttachment[];
   date: number;
   assigneeId?: string | null;
 }
@@ -401,6 +408,24 @@ async function loadAttachments(
     .bind(messageId)
     .all<Attachment>();
   return (results ?? []).map((r) => ({ ...r }));
+}
+
+export async function getAttachment(
+  env: Env,
+  id: string,
+): Promise<AttachmentWithThread | null> {
+  return guard("getAttachment", async () => {
+    const row = await env.DB.prepare(
+      `SELECT a.id, a.message_id, a.filename, a.content_type, a.size_bytes,
+              a.content_id, a.inline, a.r2_key, a.created_at, m.thread_id
+         FROM attachments a
+         JOIN messages m ON m.id = a.message_id
+        WHERE a.id = ?`,
+    )
+      .bind(id)
+      .first<AttachmentWithThread>();
+    return row ? { ...row } : null;
+  });
 }
 
 /** Full-text-ish search across messages, optionally scoped to a mailbox. */
@@ -898,9 +923,10 @@ export async function insertOutboundMessage(
   msg: OutboundMessageInput,
 ): Promise<string> {
   return guard("insertOutboundMessage", async () => {
-    const id = uuid();
+    const id = msg.id ?? uuid();
     const now = Date.now();
     const r2RawKey = `msg/${id}.eml`;
+    const attachments = msg.attachments ?? [];
 
     // Find-or-create the thread so the message always has a valid parent row.
     const threadId = await upsertThread(env, {
@@ -939,11 +965,12 @@ export async function insertOutboundMessage(
         msg.text,
         msg.html,
         r2RawKey,
-        bool(msg.hasAttachments),
+        bool(msg.hasAttachments || attachments.length > 0),
         msg.date,
         now,
       )
       .run();
+    await insertAttachments(env, id, attachments);
     return id;
   });
 }

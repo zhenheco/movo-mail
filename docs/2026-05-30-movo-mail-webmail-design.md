@@ -21,9 +21,9 @@
 
 zhenheco 已有中央交易郵件中繼 **cf-email Worker**（`https://cf-email.acejou27.workers.dev`），底層 = **Cloudflare Email Routing `send_email` binding**（非 MailChannels、非 Resend）。本專案所有出站信都打它，符合全域 `cf-email-sdk` 標準（idempotency / suppression / webhook / D1 log 集中）。
 
-- `POST /send`，header `X-API-Key: cfes_…`（env 名 `CF_EMAIL_API_KEY`），body `{ to, from, subject, html, text, tags? }` + `Idempotency-Key` header。`tags` 是 `string[]`。
+- `POST /send`，header `X-API-Key: cfes_…`（env 名 `CF_EMAIL_API_KEY`），body `{ to, from, subject, html, text, tags?, attachments? }` + `Idempotency-Key` header。`tags` 是 `string[]`；`attachments` 為 base64 content，最多 10 個，附件 payload 上限 5 MiB。
 - **本 repo 零 ESP/寄信 key**（認證集中在 cf-email Worker）。
-- ⚠️ **cf-email 現況硬限制**（見 cf-email-sdk skill）：(a) **不支援 attachments**；(b) **不支援 custom headers** → 無法帶 `In-Reply-To`/`References`，**outbound threading 無法原生串**；(c) **1000 封/天/domain**（CF Email beta 硬限）；(d) `to` 限單一純 email、`from` display name 會被剝。→ 見 §11 決策。
+- ⚠️ **cf-email 現況硬限制**（見 cf-email-sdk skill）：(a) **不支援 custom headers** → 無法帶 `In-Reply-To`/`References`，**outbound threading 無法原生串**；(b) **1000 封/天/domain**（CF Email beta 硬限）；(c) `to` 限單一純 email、`from` display name 會被剝。→ 見 §11 決策。
 
 ---
 
@@ -80,7 +80,8 @@ movo.com.my 在我們 CF（acejou27 帳號，Email Routing 已啟用 = 現有 MX
 - Views：inbox list / thread / compose / search。HTML mail 顯示 sanitize（DOMPurify）防 XSS。
 
 ### 6.4 Outbound / Send
-- `POST /api/send` → 驗證 → call **cf-email Worker `/send`**（From `name@movo.com.my`、`In-Reply-To`/`References`、idempotencyKey）→ 成功寫 `messages(direction=out)` + `send_log` + R2 `.eml`。
+- `POST /api/send` → 驗證 → call **cf-email Worker `/send`**（From `name@movo.com.my`、idempotencyKey、可帶 base64 attachments）→ 成功寫 `messages(direction=out)` + `send_log` + R2 `.eml` + R2/D1 attachment index。
+- `GET /api/attachment/:id` → 檢查 thread visibility → 從 R2 回傳附件下載；未授權與不存在都回 404。
 
 ### 6.5 AI 代寫代發
 - `POST /api/ai/draft` → LLM 依 thread context 起草 → 回 draft。**Phase 4 先強制人工核可** → `/api/send`。
@@ -115,7 +116,7 @@ movo.com.my 在我們 CF（acejou27 帳號，Email Routing 已啟用 = 現有 MX
 ## 9. Testing（TDD）
 
 - inbound parse：sample `.eml` → assert D1 rows + R2 keys。
-- send：mock cf-email `/send` → assert from / In-Reply-To / idempotencyKey、suppression 攔截、`send_log`。
+- send：mock cf-email `/send` → assert from / idempotencyKey / attachments、suppression 攔截、`send_log`。
 - auth：未登入 → 401。
 - threading：reply 串回同 thread。
 - AI draft：mock LLM → 回 draft、未核可不寄。
@@ -130,7 +131,7 @@ movo.com.my 在我們 CF（acejou27 帳號，Email Routing 已啟用 = 現有 MX
 | **P0** | DNS（SPF+lockdown+DKIM）+ movo.com.my 在 cf-email/MailChannels 驗證 + WP relay | MailChannels 帳號方案確認 |
 | **P1** | inbound capture → D1/R2 | — |
 | **P2** | webmail read UI + CF Access | — |
-| **P3** | compose/send（cf-email）+ threading | cf-email custom headers 支援確認 |
+| **P3** | compose/send（cf-email）+ attachment upload/download + threading | cf-email custom headers 支援確認 |
 | **P4** | AI 代寫代發 + guardrail | LLM key |
 | P5 | 行銷群發 | 另 spec defer |
 
@@ -138,10 +139,9 @@ movo.com.my 在我們 CF（acejou27 帳號，Email Routing 已啟用 = 現有 MX
 
 ## 11. Open questions
 
-- **【重要決策】cf-email 限制怎麼處理**：cf-email 現**不支援 attachments + custom headers(In-Reply-To)**。
-  - **選項 A（v1 快速上線）**：接受限制 — webmail 可寄純文字/HTML，**不能寄附件**、**回信不串原 thread**（收件端視為新信）。AI 代寫代發純文字客服信 OK。
-  - **選項 B（擴充中央服務）**：去 `Waiting projects/cf email` repo 擴 `/send` 支援 `attachments`(base64) + `headers`(In-Reply-To/References) + 擴 `email_logs` schema + SDK。一次做全品牌受惠，但動到中央 transactional 服務、要 TDD + 不可破壞現有 caller。
-  - 建議：**v1 走 A 先上線**，B 排後續 milestone。 → ✅ **已選 A（2026-05-30）**：webmail v1 寄純文字/HTML、無附件、回信不串 thread；附件 + threading 留 B（擴中央 cf-email）排後續。
+- **【重要決策】cf-email 限制怎麼處理**：attachments 已在中央 cf-email `/send` 補上 base64 payload 支援；Movo Mail 可收、下載、上傳與寄出附件。
+  - 仍未解：custom headers（`In-Reply-To`/`References`）尚未進 cf-email relay，所以 outbound threading 仍無法原生串在收件端。
+  - 限制：最多 10 個附件，附件 payload 上限 5 MiB；超過時 `/api/send` 直接拒絕。
 - movo.com.my 是否已在 cf-email Worker 帳號設為『可發送 domain』？（同 acejou27 帳號，須確認/加白）
 - DMARC 過渡先 quarantine？（建議 yes）
 - AI 代發 Phase 4 是否永久強制人工核可。

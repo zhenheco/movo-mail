@@ -13,8 +13,12 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import { canUserReadThread, getMessage } from "../db";
+import { canUserReadThread, getAttachment, getMessage } from "../db";
 import { resolveViewer } from "./scope";
+
+function downloadName(filename: string): string {
+  return (filename || "attachment").replace(/["\\\r\n]/g, "_");
+}
 
 /** Build the /message sub-router. */
 export function messageRoutes(): Hono<AccessEnv> {
@@ -44,6 +48,50 @@ export function messageRoutes(): Hono<AccessEnv> {
       return c.json({ message });
     } catch {
       return c.json({ error: "failed to load message" }, 500);
+    }
+  });
+
+  app.get("/attachment/:id", async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ error: "id is required" }, 400);
+    }
+
+    const user = c.get("user");
+    try {
+      const attachment = await getAttachment(c.env, id);
+      if (!attachment) {
+        return c.json({ error: "attachment not found" }, 404);
+      }
+
+      const viewer = await resolveViewer(c.env, user);
+      const canRead = await canUserReadThread(
+        c.env,
+        attachment.thread_id,
+        viewer,
+      );
+      if (!canRead) {
+        return c.json({ error: "attachment not found" }, 404);
+      }
+
+      const object = await c.env.MAIL_R2.get(attachment.r2_key);
+      if (!object) {
+        return c.json({ error: "attachment not found" }, 404);
+      }
+
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set(
+        "Content-Type",
+        attachment.content_type ?? headers.get("Content-Type") ?? "application/octet-stream",
+      );
+      headers.set(
+        "Content-Disposition",
+        `attachment; filename="${downloadName(attachment.filename)}"`,
+      );
+      return new Response(object.body, { headers });
+    } catch {
+      return c.json({ error: "failed to load attachment" }, 500);
     }
   });
 

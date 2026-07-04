@@ -228,7 +228,7 @@ beforeEach(() => {
 // transport: sendViaCfEmail
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("sendViaCfEmail", () => {
+  describe("sendViaCfEmail", () => {
   it("POSTs to {endpoint}/send with x-api-key and an idempotencyKey", async () => {
     const fetchMock = stubRelay(relayOk());
 
@@ -257,6 +257,33 @@ describe("sendViaCfEmail", () => {
     expect((sent.headers as Record<string, string>)["In-Reply-To"]).toBe(
       "<orig-abc@example.com>",
     );
+  });
+
+  it("forwards attachments to the cf-email relay", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    await sendViaCfEmail(makeEnv(), {
+      from: { address: "alice@movo.com.my" },
+      to: [{ address: "bob@example.com" }],
+      subject: "Invoice",
+      text: "attached",
+      attachments: [
+        {
+          filename: "invoice.txt",
+          contentType: "text/plain",
+          contentBase64: "aGVsbG8=",
+        },
+      ],
+    });
+
+    expect(sentBody(fetchMock).attachments).toEqual([
+      {
+        filename: "invoice.txt",
+        type: "text/plain",
+        content: "aGVsbG8=",
+        disposition: "attachment",
+      },
+    ]);
   });
 
   it("honors a caller-supplied idempotencyKey", async () => {
@@ -674,6 +701,44 @@ describe("POST /send", () => {
     expect(logArg.providerId).toBe("cfes_msg_1");
     expect(typeof logArg.idempotencyKey).toBe("string");
     expect(logArg.idempotencyKey.length).toBeGreaterThan(0);
+  });
+
+  it("sends, archives, and indexes outbound attachments", async () => {
+    const fetchMock = stubRelay(relayOk());
+    const env = makeEnv();
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Invoice",
+        text: "attached",
+        mailboxId: MAILBOX.id,
+        attachments: [
+          {
+            filename: "invoice.txt",
+            contentType: "text/plain",
+            contentBase64: "aGVsbG8=",
+          },
+        ],
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect((sentBody(fetchMock).attachments as unknown[]).length).toBe(1);
+    const arg = insertOutboundMessage.mock.calls[0]?.[1] as {
+      id: string;
+      hasAttachments: boolean;
+      attachments: Array<{ filename: string; content: Uint8Array }>;
+    };
+    expect(arg.hasAttachments).toBe(true);
+    expect(arg.attachments[0]?.filename).toBe("invoice.txt");
+    expect(new TextDecoder().decode(arg.attachments[0]?.content)).toBe("hello");
+    expect(env.MAIL_R2.put).toHaveBeenCalledWith(
+      `att/${arg.id}/0`,
+      expect.any(Uint8Array),
+      expect.anything(),
+    );
   });
 
   it("omits threadId for a brand-new (non-reply) send so the data layer creates a real thread", async () => {

@@ -8,9 +8,13 @@ import type {
   EmailAddress,
   EpochMs,
   MessageWithAttachments,
+  OutboundAttachment,
   SendRequest,
 } from "./types";
 import { replySubject } from "./format";
+
+export const MAX_ATTACHMENT_COUNT = 10;
+export const MAX_ATTACHMENT_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
 /** History item shape expected by POST /api/ai/draft. */
 export interface DraftHistoryItem {
@@ -78,15 +82,38 @@ export interface BuildSendArgs {
   to: EmailAddress[];
   subject: string;
   text: string;
+  attachments?: OutboundAttachment[];
   threadId?: string;
   mailboxId?: string;
   inReplyTo?: string;
   references?: string;
 }
 
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    const chunk = bytes.subarray(i, i + 0x8000);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+export function estimatedBase64Length(byteLength: number): number {
+  return Math.ceil(byteLength / 3) * 4;
+}
+
+export async function fileToAttachment(file: File): Promise<OutboundAttachment> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return {
+    filename: file.name || "attachment",
+    contentType: file.type || "application/octet-stream",
+    contentBase64: bytesToBase64(bytes),
+  };
+}
+
 /**
  * Assemble the POST /api/send body. Threading headers are only attached when
- * present (the cf-email relay may or may not honor them — see spec §11).
+ * present; cf-email currently does not forward custom headers (see spec §11).
  */
 export function buildSendRequest(args: BuildSendArgs): SendRequest {
   const headers: Record<string, string> = {};
@@ -111,6 +138,9 @@ export function buildSendRequest(args: BuildSendArgs): SendRequest {
   }
   if (args.mailboxId) {
     request.mailboxId = args.mailboxId;
+  }
+  if (args.attachments && args.attachments.length > 0) {
+    request.attachments = args.attachments;
   }
   return request;
 }

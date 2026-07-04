@@ -253,6 +253,14 @@ export interface ParsedInbound {
 // Outbound send (src/lib/cfemail.sendViaCfEmail)
 // ─────────────────────────────────────────────────────────────────────────────
 
+export interface OutboundAttachment {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+  contentId?: string;
+  inline?: boolean;
+}
+
 /** Extra RFC-5322 headers forwarded to the cf-email relay (e.g. threading). */
 export interface SendHeaders {
   "In-Reply-To"?: string;
@@ -270,6 +278,7 @@ export interface SendRequest {
   subject: string;
   text?: string;
   html?: string;
+  attachments?: OutboundAttachment[];
   /** Threading + custom headers forwarded to the relay. */
   headers?: SendHeaders;
   /** Idempotency key; relay dedupes on this. Generated if omitted. */

@@ -106,7 +106,9 @@ export function ThreadView({ messageId, onReply }: ThreadViewProps) {
                   className="rounded-md border border-border px-3 py-1.5 text-xs"
                   title={`${att.content_type ?? "file"} · ${att.size_bytes} bytes`}
                 >
-                  {att.filename || "(unnamed)"}
+                  <a href={`/api/attachment/${encodeURIComponent(att.id)}`}>
+                    {att.filename || "(unnamed)"}
+                  </a>
                 </li>
               ))}
             </ul>
