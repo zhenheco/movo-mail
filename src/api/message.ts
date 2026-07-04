@@ -20,6 +20,15 @@ function downloadName(filename: string): string {
   return (filename || "attachment").replace(/["\\\r\n]/g, "_");
 }
 
+function contentDisposition(filename: string): string {
+  const safe = downloadName(filename);
+  const ascii = safe.replace(/[^\x20-\x7E]/g, "_");
+  const encoded = encodeURIComponent(safe).replace(/['()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 /** Build the /message sub-router. */
 export function messageRoutes(): Hono<AccessEnv> {
   const app = new Hono<AccessEnv>();
@@ -87,7 +96,7 @@ export function messageRoutes(): Hono<AccessEnv> {
       );
       headers.set(
         "Content-Disposition",
-        `attachment; filename="${downloadName(attachment.filename)}"`,
+        contentDisposition(attachment.filename),
       );
       return new Response(object.body, { headers });
     } catch {

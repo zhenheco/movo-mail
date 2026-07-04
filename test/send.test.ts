@@ -741,6 +741,57 @@ describe("POST /send", () => {
     );
   });
 
+  it("rejects oversized attachments before calling the relay", async () => {
+    const fetchMock = stubRelay(relayOk());
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Too large",
+        text: "attached",
+        mailboxId: MAILBOX.id,
+        attachments: [
+          {
+            filename: "large.txt",
+            contentType: "text/plain",
+            contentBase64: "A".repeat(5 * 1024 * 1024 + 4),
+          },
+        ],
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still persists sent messages when attachment archival fails", async () => {
+    stubRelay(relayOk());
+    const env = makeEnv();
+    vi.mocked(env.MAIL_R2.put).mockRejectedValueOnce(new Error("R2 down"));
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Invoice",
+        text: "attached",
+        mailboxId: MAILBOX.id,
+        attachments: [
+          {
+            filename: "invoice.txt",
+            contentType: "text/plain",
+            contentBase64: "aGVsbG8=",
+          },
+        ],
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertOutboundMessage).toHaveBeenCalledTimes(1);
+    expect(insertSendLog).toHaveBeenCalledTimes(1);
+  });
+
   it("omits threadId for a brand-new (non-reply) send so the data layer creates a real thread", async () => {
     // Regression: previously this passed the idempotencyKey as threadId, which
     // pointed at a non-existent threads row → messages→threads FK violation →

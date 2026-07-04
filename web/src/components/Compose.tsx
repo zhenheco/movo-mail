@@ -92,6 +92,7 @@ export function Compose({
   const [body, setBody] = useState(initial.body);
   const [attachments, setAttachments] = useState<OutboundAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   // Which owned mailbox sends. A reply is locked to the thread's mailbox
   // (initial.mailboxId); a new message defaults to it, else the first owned.
@@ -114,7 +115,11 @@ export function Compose({
   const hasValidRecipient =
     recipients.length > 0 && recipients.every((r) => isLikelyEmail(r.address));
   const canSend =
-    hasValidRecipient && subject.trim().length > 0 && sendPhase !== "sending";
+    hasValidRecipient &&
+    subject.trim().length > 0 &&
+    sendPhase !== "sending" &&
+    !attachmentBusy &&
+    !attachmentError;
 
   async function handleAiDraft() {
     if (!initial.threadId) {
@@ -179,6 +184,7 @@ export function Compose({
 
   async function handleFiles(files: FileList | null) {
     setAttachmentError(null);
+    setAttachmentBusy(false);
     if (!files || files.length === 0) {
       setAttachments([]);
       return;
@@ -187,6 +193,7 @@ export function Compose({
     if (selected.length > MAX_ATTACHMENT_COUNT) {
       setAttachments([]);
       setAttachmentError(`Attach up to ${MAX_ATTACHMENT_COUNT} files.`);
+      clearAttachmentInput();
       return;
     }
     const estimatedPayload = selected.reduce(
@@ -196,22 +203,32 @@ export function Compose({
     if (estimatedPayload > MAX_ATTACHMENT_PAYLOAD_BYTES) {
       setAttachments([]);
       setAttachmentError("Attachments must be 5 MiB or less.");
+      clearAttachmentInput();
       return;
     }
+    setAttachmentBusy(true);
     try {
       setAttachments(await Promise.all(selected.map(fileToAttachment)));
     } catch {
       setAttachments([]);
       setAttachmentError("Could not read the selected attachment.");
+      clearAttachmentInput();
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  function clearAttachmentInput() {
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
     }
   }
 
   function clearAttachments() {
     setAttachments([]);
     setAttachmentError(null);
-    if (attachmentInputRef.current) {
-      attachmentInputRef.current.value = "";
-    }
+    setAttachmentBusy(false);
+    clearAttachmentInput();
   }
 
   return (
@@ -300,6 +317,8 @@ export function Compose({
           <span className="truncate text-muted-foreground">
             {attachments.length > 0
               ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"} selected`
+              : attachmentBusy
+                ? "Reading attachments..."
               : "Attach files"}
           </span>
           <Input

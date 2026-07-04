@@ -169,12 +169,15 @@ function parseAttachments(input: unknown): ParsedAttachment[] | { error: string 
         : "application/octet-stream";
     const contentBase64 =
       typeof raw.contentBase64 === "string" ? raw.contentBase64.trim() : "";
-    const content = decodeBase64(contentBase64);
-    if (!filename || !content) return { error: "invalid attachment" };
+    if (!filename || !contentBase64 || !isBase64(contentBase64)) {
+      return { error: "invalid attachment" };
+    }
     total += contentBase64.length;
     if (total > MAX_ATTACHMENT_PAYLOAD_BYTES) {
       return { error: "attachments exceed the 5 MiB email limit" };
     }
+    const content = decodeBase64(contentBase64);
+    if (!content) return { error: "invalid attachment" };
     out.push({
       filename,
       contentType,
@@ -298,15 +301,22 @@ async function archiveAttachments(
   env: Env,
   messageId: string,
   attachments: ParsedAttachment[],
-): Promise<void> {
+): Promise<ParsedAttachment[]> {
+  const archived: ParsedAttachment[] = [];
   for (let i = 0; i < attachments.length; i += 1) {
     const att = attachments[i]!;
-    await env.MAIL_R2.put(`att/${messageId}/${i}`, att.content as Uint8Array, {
-      httpMetadata: {
-        contentType: att.contentType ?? "application/octet-stream",
-      },
-    });
+    try {
+      await env.MAIL_R2.put(`att/${messageId}/${archived.length}`, att.content, {
+        httpMetadata: {
+          contentType: att.contentType ?? "application/octet-stream",
+        },
+      });
+      archived.push(att);
+    } catch {
+      // Best-effort sent-copy archival; the relay already accepted the email.
+    }
   }
+  return archived;
 }
 
 /**
@@ -566,7 +576,11 @@ export function sendRoutes(): Hono<AccessEnv> {
       const outboundMessageId = crypto.randomUUID();
       const eml = buildEml(sendReq, localMessageId, inReplyTo, references);
       const r2RawKey = `msg/${outboundMessageId}.eml`;
-      await archiveAttachments(c.env, outboundMessageId, validated.attachments);
+      const archivedAttachments = await archiveAttachments(
+        c.env,
+        outboundMessageId,
+        validated.attachments,
+      );
       try {
         await c.env.MAIL_R2.put(r2RawKey, eml, {
           httpMetadata: { contentType: "message/rfc822" },
@@ -594,8 +608,8 @@ export function sendRoutes(): Hono<AccessEnv> {
         text: validated.text,
         html: validated.html,
         snippet: makeSnippet(validated.text, validated.html),
-        hasAttachments: validated.attachments.length > 0,
-        attachments: validated.attachments,
+        hasAttachments: archivedAttachments.length > 0,
+        attachments: archivedAttachments,
         date: Date.now(),
         ...(assigneeId ? { assigneeId } : {}),
       });

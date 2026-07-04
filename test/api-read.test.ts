@@ -293,8 +293,29 @@ describe("GET /attachment/:id", () => {
       userId: "user-alice",
       isAdmin: false,
     });
-    expect(res.headers.get("Content-Disposition")).toBe(
-      'attachment; filename="invoice.txt"',
+    expect(res.headers.get("Content-Disposition")).toContain(
+      'filename="invoice.txt"',
+    );
+  });
+
+  it("downloads attachments with non-ASCII filenames", async () => {
+    mGetAttachment.mockResolvedValue({
+      ...makeAttachment({ filename: "發票.pdf" }),
+      thread_id: "th-1",
+    });
+    const r2Get = vi.fn().mockResolvedValue({
+      body: new Blob(["pdf"]).stream(),
+      writeHttpMetadata: () => undefined,
+    });
+
+    const res = await dispatch(
+      "/attachment/att-1",
+      fakeEnv({ MAIL_R2: { get: r2Get } as unknown as Env["MAIL_R2"] }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Disposition")).toContain(
+      "filename*=UTF-8''%E7%99%BC%E7%A5%A8.pdf",
     );
   });
 
