@@ -1,0 +1,160 @@
+# Movo Mail multi-attachment and Reply All recipients — SPEC
+
+## Problem Statement
+
+When a user composes or replies to an email in Movo Mail, the UI and relay path do not preserve the complete recipient set. Reply only targets the sender, there is no explicit Reply All action, Cc/Bcc cannot be edited consistently, and the current relay adapter collapses multiple To recipients to one address. Attachments appear to support multiple files in the browser, but the end-to-end contract is not proven for the 10-file boundary. This can silently omit recipients, lose threading metadata, expose or mis-handle Bcc, or make a user believe that multiple attachments were sent when the relay ignored them.
+
+## Solution
+
+Users can add up to 10 attachments to a new message or reply and see validation before sending. The compose surface exposes To, Cc, and Bcc as separate recipient fields and sends one logical message through the canonical cf-mail relay with all recipient arrays, threading headers, attachments, and one idempotency key. Reply remains sender-only; Reply All is explicit and includes the original sender, visible To/Cc recipients, and authoritative original Bcc recipients with case-insensitive deduplication and self-address removal. If trusted original Bcc data is unavailable, automatic Reply All is blocked and the user must explicitly confirm and manually supply Bcc recipients; the system never silently sends a visible-recipient-only Reply All.
+
+## User Stories
+
+1. As a mailbox user, I want to attach multiple files to a new message, so that I can send a complete document package in one email.
+2. As a mailbox user, I want to attach up to 10 files, so that the product supports the requested maximum without requiring separate messages.
+3. As a mailbox user, I want the 11th attachment to be rejected before sending, so that I receive a clear error instead of a partial or ambiguous send.
+4. As a mailbox user, I want total attachment/message-size validation before sending, so that provider-size failures are caught locally.
+5. As a mailbox user, I want to enter multiple To recipients, so that one logical message reaches all intended primary recipients.
+6. As a mailbox user, I want separate Cc and Bcc fields, so that visible and hidden recipients retain their intended semantics.
+7. As a mailbox user, I want invalid recipient input to be rejected rather than silently discarded, so that I can correct the actual message before sending.
+8. As a mailbox user, I want Reply to address only the original sender, so that a normal reply does not unexpectedly disclose the conversation to other recipients.
+9. As a mailbox user, I want an explicit Reply All action, so that recipient expansion is intentional and visible in the compose form.
+10. As a mailbox user, I want Reply All to include the original sender and original visible To/Cc recipients, so that the conversation continues with everyone who was visibly included.
+11. As a mailbox user, I want Reply All to include authoritative original Bcc recipients when available, so that the original hidden recipients are preserved as requested.
+12. As a mailbox user, I want my own mailbox addresses removed from Reply All, so that I do not send a redundant copy to myself.
+13. As a mailbox user, I want duplicate recipient addresses deduplicated case-insensitively across To/Cc/Bcc, so that a person does not receive duplicate copies.
+14. As a mailbox user, I want Reply All to preserve Bcc as hidden delivery recipients, so that Bcc addresses are never placed in visible headers or shown to other recipients.
+15. As a mailbox user, I want automatic Reply All blocked when original Bcc cannot be verified, so that the system does not silently lose hidden recipients.
+16. As a mailbox user, I want to explicitly confirm and manually enter Bcc when the original Bcc is unavailable, so that I can still send an intentional message after reviewing the missing provenance.
+17. As a mailbox user, I want replies to preserve In-Reply-To and References, so that recipients' mail clients keep the message in the correct conversation.
+18. As a mailbox user, I want replies with attachments to retain their recipient and threading semantics, so that attachments do not turn a reply into an unrelated message.
+19. As a mailbox user, I want a failed relay request to produce no sent-copy success, so that UI status reflects the actual send outcome.
+20. As a mailbox user, I want retrying with the same idempotency key not to send duplicates, so that network retries are safe.
+21. As a mailbox owner, I want my sent copy to retain its Bcc data for my own future Reply All operation, so that trusted provenance is not lost after sending.
+22. As a mailbox owner, I want shared-mailbox permissions and the server-selected From address to remain enforced, so that recipient enhancements cannot send as an unauthorized mailbox.
+23. As a mailbox owner, I want the relay contract to use one logical send rather than per-recipient fan-out, so that threading, idempotency, and Bcc privacy remain consistent.
+24. As an operator, I want the cf-mail relay contract and Movo adapter tested at their boundaries, so that deployment does not depend on an untested provider serialization assumption.
+25. As an operator, I want production smoke checks to verify the deployed API and UI without sending real customer email, so that release verification is safe and evidence-based.
+
+## Modules
+
+| Module | 職責（一句） | 公開介面（窄） | 新建/修改 |
+|---|---|---|---|
+| Server send validation | Normalize and validate To/Cc/Bcc and attachment arrays, enforce the 10-file and total-size limits, and reject invalid entries before relay submission. | `validateSendBody(input) -> ValidatedBody \| error` | 修改 `src/api/send.ts` |
+| Recipient semantics | Build sender-only Reply and explicit Reply All recipient sets from trusted message data, removing self addresses and deduplicating case-insensitively. | `replyDraft(message)` / `replyAllDraft(message, ownAddresses) -> ComposeDraft` | 修改 `web/src/lib/compose.ts` |
+| Compose state and controls | Expose separate To/Cc/Bcc inputs, Reply/Reply All mode, attachment selection, manual Bcc confirmation, and pre-send errors. | `Compose` props and local form handlers | 修改 `web/src/components/Compose.tsx` |
+| Thread actions | Display visible recipient metadata and expose Reply and Reply All actions with the original message context. | `ThreadView` action callbacks | 修改 `web/src/components/ThreadView.tsx` |
+| App reply orchestration | Connect thread actions to compose drafts and pass the current user's mailbox addresses for self-filtering/provenance decisions. | `handleReply` / `handleReplyAll` | 修改 `web/src/App.tsx` |
+| Web API types | Mirror server Bcc and Reply All send payloads without importing Worker-only types into the browser bundle. | `SendRequest`, `ComposeDraft`, `MessageWithAttachments` | 修改 `web/src/lib/types.ts` |
+| Movo cf-mail adapter | Serialize one logical send with To/Cc/Bcc arrays, attachments, threading headers, and an HTTP idempotency header; preserve Bcc only in the dedicated field. | `sendViaCfEmail(env, req) -> SendResult` | 修改 `src/lib/cfemail.ts` |
+| Outbound persistence | Persist sent-copy To/Cc/Bcc and attachments while keeping Bcc out of visible `.eml` headers and send logs. | `insertOutboundMessage(input)` | 修改 `src/db/index.ts` / `src/api/send.ts` only as needed |
+| Canonical cf-mail `/send` contract | Validate and forward recipient arrays, attachments, custom threading headers, and `Idempotency-Key` to the Cloudflare Email Service binding in one send. | `POST /send` JSON contract | 修改 upstream `zhenheco/cf-mail` repo |
+| Relay skill contract | Document the deployed relay request/limit/idempotency contract so future Movo adapters do not rely on stale single-To or “attachments unsupported” guidance. | cf-email skill reference | 修改 `/Users/acejou/Documents/CC Cli/agents-skills/cf-email-sdk/SKILL.md` if upstream contract changes |
+
+## Implementation Decisions
+
+- Schema: no new database columns are required; existing message `to_addresses`, `cc_addresses`, and `bcc_addresses` JSON fields remain the source for persisted recipient provenance. Add a migration only if upstream relay idempotency or status behavior proves a local field is necessary.
+- API contract: Movo `POST /api/send` accepts non-empty To plus optional Cc, Bcc, attachments, threading metadata, and idempotency. The canonical relay `POST /send` accepts To/Cc/Bcc arrays, `from`, subject/body, attachments, custom `In-Reply-To`/`References` headers, and one `Idempotency-Key` HTTP header. It returns the existing `{ ok, id, status, messageId }`-compatible result to Movo.
+- Architecture: keep the canonical `zhenheco/cf-mail` service as the only outbound provider and send one logical request. Do not fan out per recipient, because fan-out breaks provider-level threading, idempotency, and Bcc privacy.
+- Recipient semantics: Reply is sender-only. Reply All is explicit, uses authoritative persisted/parsed Bcc when present, merges original sender and visible To/Cc, removes the current user's owned addresses, and deduplicates case-insensitively. Missing authoritative Bcc blocks automatic Reply All; manual Bcc entry requires an explicit user confirmation.
+- Provider integration: use Cloudflare Email Service's dedicated `to`, `cc`, and `bcc` fields and its attachment/custom-header fields; never encode Cc/Bcc as ordinary visible headers. Honor the provider's combined-recipient and message-size limits while keeping Movo's attachment-count cap at 10.
+- Security/permissions: keep Cloudflare Access and mailbox ownership enforcement unchanged; force the authenticated mailbox as From; reject invalid recipient entries instead of filtering them silently; never include Bcc in visible `.eml` headers, UI recipient summaries for non-senders, audit details, or `send_log.to_addresses`; never log attachment contents or API keys.
+- Boundaries/performance: reject attachment count >10, total encoded payload over the existing 5 MiB product limit, invalid base64, empty bodies, invalid addresses, and provider recipient-limit overflow before relay submission. Convert attachment files once and send them in one request. Preserve the current best-effort R2 sent-copy behavior without claiming archival success when R2 fails.
+- Idempotency: send the same generated/request idempotency key in the relay's `Idempotency-Key` header; include all recipient arrays, threading headers, body, and attachments in the upstream idempotency hash so a changed retry fails closed rather than sending a different message.
+- Deployment boundary: upstream cf-mail must be versioned, tested, and deployed before Movo production points at the expanded contract. If the private upstream cannot be changed in the same controlled release, stop before deploying Movo code that would send unsupported fields.
+
+## Testing Decisions
+
+| Module | 要測? | 測什麼外部行為 | Prior art（既有同類測試） |
+|---|---|---|---|
+| Server send validation | ✅ | accepts 1–10 attachments, rejects 11 and size overflow, preserves all valid To/Cc/Bcc, rejects malformed entries, and does not call relay on invalid input | `test/send.test.ts` |
+| Movo cf-mail adapter | ✅ | sends arrays and attachments in one JSON body, forwards threading headers, sends `Idempotency-Key`, and preserves Bcc as a dedicated field | `test/send.test.ts` / `web/src/lib/api.test.ts` |
+| Recipient semantics | ✅ | Reply is sender-only; Reply All merges trusted recipients, removes self, deduplicates, carries Bcc, and blocks/flags unavailable Bcc | `web/src/lib/api.test.ts` |
+| Compose state and controls | ✅ | To/Cc/Bcc controls round-trip, Reply All warning/confirmation is enforced, attachment boundary messages are visible, and successful submit sends one request | existing web component tests plus `web/src/lib/api.test.ts` |
+| Thread actions and App orchestration | ✅ | Reply and Reply All actions open the correct draft and preserve mailbox/thread context | `web/src/lib/selection.test.ts` / `web/src/lib/api.test.ts` |
+| Persistence and Bcc secrecy | ✅ | sent copy persists Bcc for owner-only future use, visible `.eml` omits Bcc, send log does not leak Bcc, and attachments remain linked | `test/api-read.test.ts` / `test/send.test.ts` |
+| Canonical cf-mail `/send` | ✅ | accepts arrays, max 10 attachments, idempotent replay/mismatch, custom threading headers, provider field mapping, and rejects malformed recipient/attachment input | upstream `test/send.test.ts` / `test/idempotency.test.ts` |
+| Skill contract | ✅ | documented endpoint fields, limits, idempotency, and deployment commands match the canonical relay implementation and Movo adapter | skill smoke/read-back plus repository diff review |
+| Release smoke | ✅ | production health/API reachability and authenticated UI route behavior are verified without sending real customer mail; controlled test send is only performed with explicit approval | deployment/runbook probes |
+
+## Vertical Slices
+
+### Slice 1 — Canonical relay recipient and attachment contract
+
+- **Type**: AFK
+- **Blocked by**: None
+- **User stories**: #1, #5, #6, #19, #20, #23, #24
+- **Acceptance criteria**:
+  - [ ] cf-mail `/send` accepts To/Cc/Bcc arrays and forwards them through one Cloudflare Email Service binding call.
+  - [ ] cf-mail accepts attachment arrays, rejects malformed values, accepts 10, rejects 11, and enforces the documented total-message limit.
+  - [ ] cf-mail forwards `In-Reply-To` and `References` as custom headers and uses `Idempotency-Key` for replay/mismatch behavior.
+  - [ ] Movo's adapter emits the expanded contract and preserves Bcc without putting it into ordinary headers.
+  - [ ] Upstream and Movo focused tests pass, including provider payload assertions and idempotency cases.
+
+### Slice 2 — Server validation, persistence, and privacy
+
+- **Type**: AFK
+- **Blocked by**: Slice 1
+- **User stories**: #3, #4, #7, #14, #21, #22
+- **Acceptance criteria**:
+  - [ ] Movo rejects invalid recipients/attachments and the 11th attachment before relay submission.
+  - [ ] Movo sends all valid recipient arrays and up to 10 attachments without truncation.
+  - [ ] Existing mailbox ownership, Access, rate-limit, suppression, and idempotency behavior remains enforced.
+  - [ ] Sent copies persist To/Cc/Bcc for the owner, while visible `.eml` output and send logs do not expose Bcc.
+  - [ ] Server tests prove the negative privacy and no-partial-send paths.
+
+### Slice 3 — Compose Cc/Bcc and multi-attachment UI
+
+- **Type**: AFK
+- **Blocked by**: Slice 2
+- **User stories**: #1, #2, #3, #4, #5, #6, #7, #18
+- **Acceptance criteria**:
+  - [ ] New messages and replies show separate To, Cc, and Bcc controls and serialize each field correctly.
+  - [ ] The file picker accepts multiple files up to 10 and shows a clear rejection for the 11th or size overflow.
+  - [ ] The send button does not submit while recipient/attachment validation errors remain.
+  - [ ] A valid send submits one request containing all recipients, attachments, threading metadata, and idempotency.
+  - [ ] UI tests cover empty/duplicate/invalid recipient input and exact attachment boundaries.
+
+### Slice 4 — Explicit Reply All with Bcc provenance guard
+
+- **Type**: AFK
+- **Blocked by**: Slice 3
+- **User stories**: #8, #9, #10, #11, #12, #13, #14, #15, #16, #17, #18
+- **Acceptance criteria**:
+  - [ ] Reply continues to target only the original sender.
+  - [ ] Reply All is a separate action and fills original sender plus visible To/Cc and authoritative Bcc, removing self and case-insensitive duplicates.
+  - [ ] Bcc remains in the Bcc field and is not rendered as a visible To/Cc recipient.
+  - [ ] When authoritative original Bcc is absent, Reply All is blocked with an explanation and cannot send until the user explicitly confirms and manually enters Bcc.
+  - [ ] Reply and Reply All preserve thread id, In-Reply-To, References, subject, and history.
+  - [ ] UI and API tests cover available/unavailable Bcc and mixed-case duplicate addresses.
+
+### Slice 5 — Release verification and contract documentation
+
+- **Type**: HITL
+- **Blocked by**: Slice 4
+- **User stories**: #24, #25
+- **Acceptance criteria**:
+  - [ ] The cf-email skill documents the deployed relay contract, limits, idempotency, and deployment/migration commands accurately.
+  - [ ] Movo typecheck, unit/worker tests, build, lint/diff checks, and destructive QA pass.
+  - [ ] The upstream relay and Movo deployments are independently verified at their real endpoints.
+  - [ ] Production health and Access-protected UI/API smoke evidence is captured without sending customer email.
+  - [ ] Any controlled test send uses disposable/test recipients and explicit user authorization; otherwise release stops before send.
+
+## Out of Scope
+
+- Replacing Cloudflare Email Service or the canonical cf-mail provider.
+- Sending one copy per recipient or otherwise fanning out a logical message.
+- Increasing the Movo product attachment cap above 10.
+- Inferring missing Bcc addresses from visible headers, delivery metadata, or message body content.
+- Automatically sending Reply All when authoritative original Bcc is unavailable.
+- Redesigning mailbox permissions, Cloudflare Access onboarding, shared-mailbox assignment, or the existing thread model.
+- Adding a new attachment storage provider or changing R2 archival semantics beyond what is required for the sent-copy behavior.
+- Sending real customer-facing test emails as part of automated deployment verification.
+
+## Further Notes
+
+- The current Movo checkout already has a 10-attachment UI/server boundary and persisted Bcc columns, but the relay adapter collapses To to one address and does not serialize Cc/Bcc. The implementation must close that full-chain gap rather than only change the UI.
+- The canonical upstream repository is private and its current main commit was inspected read-only. Its current tests skip the real `EMAIL.send` path, so provider payload mapping requires explicit contract tests and a safe deployed smoke check.
+- Cloudflare's current Workers API supports structured To/Cc/Bcc, custom headers, attachments, and a combined recipient limit; the implementation must use those dedicated fields and remain within the provider's complete message-size limit. See the official [Workers API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) and [recipient fields](https://developers.cloudflare.com/email-service/examples/email-sending/recipients/).
+- Movo production uses Cloudflare Worker environments. Deploy only after upstream contract compatibility is confirmed; a successful build or worker deployment alone is not live feature proof.
+- The final release report must distinguish code/test proof, upstream deployment proof, Movo deployment proof, authenticated Access proof, and controlled delivery proof.
