@@ -1,6 +1,6 @@
 # Movo Mail release evidence manifest
 
-Status: **production-deployed (worker/curl evidence; authenticated Access browser proof deferred)**<br>
+Status: **production-verified (worker/curl + authenticated Access browser evidence; no-real-send)**<br>
 Review date: 2026-08-14 (Asia/Taipei)<br>
 Scope: documentation-only evidence for the exact AutoFlow candidate; no product-code changes are made by this manifest.
 
@@ -14,7 +14,7 @@ Scope: documentation-only evidence for the exact AutoFlow candidate; no product-
 | Upstream `cf-mail` SHA | `5c931cd86c170cf048d4ce9e0d95dbc265fa3d86` | exact deployed relay candidate |
 | Relay deployment | `02493f59-2583-4e15-b6fb-a78b406f2eba` | `https://cf-email.acejou27.workers.dev/healthz` returned 200 |
 | Movo staging deployment | `e6147a95-cc8d-4849-9de2-ab561f1a273f` | `https://movo-mail-staging.acejou27.workers.dev/healthz` returned 200 |
-| Movo production deployment | `e9774d97-8bd1-4fa8-8bf6-efe8f212ffe7` | worker health/home/API smoke passed; Access custom domain returned 302 |
+| Movo production deployment | `e9774d97-8bd1-4fa8-8bf6-efe8f212ffe7` | worker health/home/API smoke passed; authenticated Access UI smoke passed |
 | Production rollback target | `e1c3ed08-a16c-4e6f-b05b-e5c6009c0b55` | captured before deployment |
 
 The SHAs above identify the exact candidates deployed to the relay and Movo production Worker. They do not constitute real email-delivery evidence.
@@ -50,17 +50,17 @@ This check is run after this manifest is added. No lint command is defined in `p
 
 ## Verification matrix
 
-The matrix records what the local candidate tests exercise and what remains externally unresolved. “Covered” means local test evidence only; it does not imply deployed-provider or authenticated-browser proof.
+The matrix records local and deployed evidence. No real email send or delivery is claimed.
 
 | Area | Cases required for release | Local evidence / status |
 |---|---|---|
-| Attachment boundary | 0, 1, and 10 attachments; 11th rejected atomically; zero-byte, malformed Base64, character-size and serialized-message limits | `test/send.test.ts`, `web/src/components/Compose.test.tsx`; local tests passed. Relay MIME-size guard is deployed. |
+| Attachment boundary | 0, 1, and 10 attachments; 11th rejected atomically; zero-byte, malformed Base64, character-size and serialized-message limits | Local tests passed. Authenticated production UI showed `新增附件（0/10）`, accepted 10 fixtures as `10/10`, and rejected the 11th with `最多可附加 10 個檔案。`; relay MIME-size guard is deployed. |
 | Recipient boundary | multiple To/Cc/Bcc, invalid address, combined recipient limit, no silent dropping | `test/send.test.ts`, `web/src/lib/api.test.ts`; local tests passed. Relay recipient-array contract is deployed. |
-| Bcc privacy | Bcc stays dedicated; absent from visible headers, `.eml`, send log, audit/error/UI surfaces; owner/shared/unrelated access boundaries | `test/send.test.ts`, `test/api-read.test.ts`, `web/src/lib/compose-reply-all.test.ts`; local tests passed. Authenticated deployed privacy proof deferred. |
+| Bcc privacy | Bcc stays dedicated; absent from visible headers, `.eml`, send log, audit/error/UI surfaces; owner/shared/unrelated access boundaries | Local tests passed. Authenticated production Reply All kept Bcc empty and showed the manual-confirmation guard; no Bcc was auto-exposed. |
 | Idempotency | same key and same canonical payload replays one result; same key with changed payload fails closed; concurrent/reconciliation paths do not resend | `test/send.test.ts`, `test/db.test.ts`; local tests passed. Durable Movo claim and relay idempotency contract are deployed; no live send probe was authorized. |
 | Threading | Reply and Reply All preserve thread id, `In-Reply-To`, `References`, subject/history; malformed or unauthorized thread fails before relay | `test/send.test.ts`, `test/reply-all.test.ts`, `web/src/lib/compose-reply-all.test.ts`; local tests passed. Relay header mapping is deployed. |
 | Reply | sender-only recipient set; no unexpected visible recipients | `test/reply-all.test.ts`, `web/src/lib/compose-reply-all.test.ts`; local tests passed. |
-| Reply All | explicit action; sender + visible To/Cc + trusted Bcc; self-removal and case-insensitive deduplication; Bcc remains hidden | `test/reply-all.test.ts`, `web/src/lib/compose-reply-all.test.ts`, `web/src/components/ThreadView.test.tsx`; local tests passed. |
+| Reply All | explicit action; sender + visible To/Cc + trusted Bcc; self-removal and case-insensitive deduplication; Bcc remains hidden | Local tests passed. Authenticated production Reply All populated the sender recipient and rendered the original-Bcc provenance confirmation guard. |
 | Reply All Bcc provenance | unavailable Bcc blocks automatic Reply All; exact confirmation plus manual Bcc is required | `test/reply-all.test.ts`, `web/src/lib/compose-reply-all.test.ts`, `web/src/components/Compose.test.tsx`; local tests passed. |
 | Persistence / failure | durable claim before relay; failed relay has no sent-copy success; post-provider archive failure is `sent_unarchived` and never resends | `test/db.test.ts`, `test/send.test.ts`, `test/api-read.test.ts`; local tests passed. Production `send_attempts` migration is applied and verified. |
 | Worker/runtime | API and asset integration under the Workers pool | `npm run test:workers`: passed with the compatibility-date fallback warning noted above. |
@@ -68,7 +68,7 @@ The matrix records what the local candidate tests exercise and what remains exte
 ## Release boundaries and remaining evidence
 
 1. The relay and Movo production Workers are deployed and their worker-level health/API/asset checks pass. The staging and production D1 migration trackers are reconciled through 0005; production `send_attempts` and indexes are present.
-2. The authenticated Cloudflare Access browser proof is **deferred**: the custom domain correctly returns a 302 to the Access login endpoint, but this environment has no authenticated session. After Access login, verify the protected UI, API behavior, browser console/network behavior, and Bcc redaction using an authorized short-lived session.
+2. Authenticated Cloudflare Access browser proof is complete for the protected production UI: mailbox list, compose, 10/10 attachment boundary, 11th-file rejection, Reply All recipient population, and Bcc privacy guard were observed. No real send was submitted.
 3. A controlled delivery probe is **not authorized and not performed**. Any future probe requires an approval record naming an allowlisted disposable recipient/domain, exact payload, purpose, delivery evidence, and cleanup proof.
 
 ## No-real-send scope
@@ -77,4 +77,4 @@ This review made no external email delivery request and claims no delivery, prov
 
 ## Handoff disposition
 
-The requested feature is deployed to production with worker/curl evidence. The only remaining operational proof is an authenticated Cloudflare Access browser pass; this was not claimed because the current session is not signed in.
+The requested feature is deployed and verified in production with worker/curl and authenticated browser evidence. Delivery remains intentionally untested because no real send was authorized.
