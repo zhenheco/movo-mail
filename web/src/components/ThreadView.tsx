@@ -1,8 +1,9 @@
 /**
  * Thread / message reader. Driven by a message id (the read API exposes
  * GET /api/message/:id). Renders the message header, sanitized body, and any
- * attachment metadata, plus a "Reply" action that opens Compose pre-filled for
- * threading.
+ * attachment metadata, plus explicit 回覆 / 全部回覆 actions. Bcc is never
+ * rendered in the message summary; the backend decides whether an owner may
+ * provide authoritative Bcc data to the Reply All draft.
  *
  * NOTE: the documented read surface is /threads, /message/:id and /search; there
  * is no per-thread message-list endpoint, so a single message is the unit shown
@@ -21,9 +22,39 @@ import { EmptyState, ErrorState, LoadingState } from "./ui/feedback";
 export interface ThreadViewProps {
   messageId: string | null;
   onReply: (message: MessageWithAttachments) => void;
+  onReplyAll: (message: MessageWithAttachments) => void;
 }
 
-export function ThreadView({ messageId, onReply }: ThreadViewProps) {
+export interface ThreadActionsProps {
+  onReply: () => void;
+  onReplyAll: () => void;
+}
+
+/** Accessible, explicit sender-only and Reply All actions. */
+export function ThreadActions({ onReply, onReplyAll }: ThreadActionsProps) {
+  return (
+    <div className="flex gap-2">
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onReply}
+        aria-label="回覆寄件者"
+      >
+        回覆
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onReplyAll}
+        aria-label="回覆全部收件者"
+      >
+        全部回覆
+      </Button>
+    </div>
+  );
+}
+
+export function ThreadView({ messageId, onReply, onReplyAll }: ThreadViewProps) {
   const state = useAsync<MessageWithAttachments>(
     () => fetchMessage(messageId as string),
     [messageId],
@@ -77,17 +108,18 @@ export function ThreadView({ messageId, onReply }: ThreadViewProps) {
             &lt;{message.from_address}&gt;
           </p>
           <p className="truncate text-xs text-muted-foreground">
-            To: {to.join(", ") || "—"}
-            {cc.length > 0 ? ` · Cc: ${cc.join(", ")}` : ""}
+            收件者：{to.join(", ") || "—"}
+            {cc.length > 0 ? ` · 副本：${cc.join(", ")}` : ""}
           </p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-2">
           <span className="text-xs text-muted-foreground">
             {formatDate(message.date)}
           </span>
-          <Button size="sm" variant="outline" onClick={() => onReply(message)}>
-            Reply
-          </Button>
+          <ThreadActions
+            onReply={() => onReply(message)}
+            onReplyAll={() => onReplyAll(message)}
+          />
         </div>
       </header>
 
@@ -97,7 +129,7 @@ export function ThreadView({ messageId, onReply }: ThreadViewProps) {
         {message.attachments && message.attachments.length > 0 ? (
           <div className="mt-6 border-t border-border pt-4">
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Attachments
+              附件
             </p>
             <ul className="flex flex-wrap gap-2">
               {message.attachments.map((att) => (

@@ -55,6 +55,8 @@ export interface Message {
   to_addresses: string;
   cc_addresses: string | null;
   bcc_addresses: string | null;
+  /** Optional typed redaction/provenance marker from the read API. */
+  bcc_provenance?: BccProvenance;
   subject: string | null;
   snippet: string | null;
   text_body: string | null;
@@ -87,6 +89,15 @@ export interface OutboundAttachment {
   contentId?: string;
   inline?: boolean;
 }
+
+/** Versioned request contract used by Movo's send endpoint. */
+export const MOVO_SEND_CONTRACT_VERSION = "movo-send-v1" as const;
+export type ReplyMode = "new" | "reply" | "reply-all";
+export type BccProvenance =
+  | "known-nonempty"
+  | "known-empty"
+  | "unavailable";
+export type BccConfirmation = "confirmed-missing-original-bcc";
 
 /** A message plus its attachments, as returned by GET /api/message/:id. */
 export interface MessageWithAttachments extends Message {
@@ -125,9 +136,12 @@ export interface AiDraftResponse {
 
 /** Body for POST /api/send (mirror of server SendRequest). */
 export interface SendRequest {
-  from: EmailAddress;
+  contract_version: typeof MOVO_SEND_CONTRACT_VERSION;
+  /** Backward-compatible client hint; the server derives the authoritative From. */
+  from?: EmailAddress;
   to: EmailAddress[];
   cc?: EmailAddress[];
+  bcc?: EmailAddress[];
   subject: string;
   text?: string;
   html?: string;
@@ -136,6 +150,9 @@ export interface SendRequest {
   idempotencyKey?: string;
   threadId?: string;
   mailboxId?: string;
+  replyMode?: ReplyMode;
+  bccProvenance?: BccProvenance;
+  bccConfirmation?: BccConfirmation;
 }
 
 /** Body for POST /api/ai/draft (mirror of server AiDraftRequest). */

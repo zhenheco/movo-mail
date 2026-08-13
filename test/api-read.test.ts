@@ -30,6 +30,7 @@ vi.mock("../src/db", () => ({
   getVisibleThreadsForUser: vi.fn(),
   getThreadsForOwner: vi.fn(),
   canUserReadThread: vi.fn(),
+  canUserReadBcc: vi.fn(),
   getMessage: vi.fn(),
   getAttachment: vi.fn(),
   getMailboxById: vi.fn(),
@@ -46,6 +47,7 @@ import {
   getVisibleThreadsForUser,
   getThreadsForOwner,
   canUserReadThread,
+  canUserReadBcc,
   getMessage,
   getAttachment,
   getMailboxById,
@@ -62,6 +64,7 @@ const mGetThreadsVisible = vi.mocked(getThreadsVisible);
 const mGetVisibleThreadsForUser = vi.mocked(getVisibleThreadsForUser);
 const mGetThreadsForOwner = vi.mocked(getThreadsForOwner);
 const mCanUserReadThread = vi.mocked(canUserReadThread);
+const mCanUserReadBcc = vi.mocked(canUserReadBcc);
 const mGetMessage = vi.mocked(getMessage);
 const mGetAttachment = vi.mocked(getAttachment);
 const mGetMailboxById = vi.mocked(getMailboxById);
@@ -189,6 +192,7 @@ beforeEach(() => {
   mGetMailboxesForUser.mockResolvedValue([OWNED_MAILBOX]);
   mGetMailboxById.mockResolvedValue(null);
   mCanUserReadThread.mockResolvedValue(true);
+  mCanUserReadBcc.mockResolvedValue(true);
   mGetAttachment.mockResolvedValue(null);
   mGetUserByEmail.mockResolvedValue({
     id: "user-alice",
@@ -265,6 +269,44 @@ describe("GET /threads", () => {
     mGetThreads.mockRejectedValue(new Error("db down"));
     const res = await dispatch("/threads?mailbox=mb-alice");
     expect(res.status).toBe(500);
+  });
+});
+
+describe("GET /message/:id Bcc privacy", () => {
+  it("returns authoritative Bcc only when the viewer is authorized", async () => {
+    mGetMessage.mockResolvedValue(
+      makeMessage({ bcc_addresses: JSON.stringify(["secret@example.com"]) }),
+    );
+    mCanUserReadBcc.mockResolvedValue(true);
+
+    const res = await dispatch("/message/msg-1");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { message: MessageWithAttachments };
+    expect(body.message.bcc_addresses).toBe(
+      JSON.stringify(["secret@example.com"]),
+    );
+  });
+
+  it("redacts Bcc for a shared-mailbox viewer without authorization", async () => {
+    mGetMessage.mockResolvedValue(
+      makeMessage({
+        mailbox_id: "mb-shared",
+        bcc_addresses: JSON.stringify(["secret@example.com"]),
+      }),
+    );
+    mCanUserReadBcc.mockResolvedValue(false);
+
+    const res = await dispatch("/message/msg-1");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { message: MessageWithAttachments };
+    expect(body.message.bcc_addresses).toBeNull();
+    expect(mCanUserReadBcc).toHaveBeenCalledWith(
+      expect.anything(),
+      "msg-1",
+      { userId: "user-alice", isAdmin: false },
+    );
   });
 });
 

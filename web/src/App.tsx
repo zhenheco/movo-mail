@@ -35,7 +35,13 @@ import {
   type MailboxSummary,
 } from "./lib/api";
 import { selectionForThread } from "./lib/selection";
-import { blankDraft, replyDraft, type ComposeDraft } from "./lib/compose";
+import {
+  blankDraft,
+  replyAllDraft,
+  replyDraft,
+  replySelfAddresses,
+  type ComposeDraft,
+} from "./lib/compose";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { Compose } from "./components/Compose";
@@ -143,6 +149,7 @@ export default function App() {
   const [inboxNonce, setInboxNonce] = useState(0);
   // Admin gating + settings panel visibility (independent of mailbox state).
   const [isAdmin, setIsAdmin] = useState(false);
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
@@ -153,11 +160,13 @@ export default function App() {
       .then((me) => {
         if (!cancelled) {
           setIsAdmin(me.isAdmin);
+          setCurrentUserEmail(me.email);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setIsAdmin(false);
+          setCurrentUserEmail(null);
         }
       });
     return () => {
@@ -254,6 +263,15 @@ export default function App() {
     setCompose(replyDraft(message));
   }
 
+  function handleReplyAll(message: MessageWithAttachments) {
+    setCompose(
+      replyAllDraft(
+        message,
+        replySelfAddresses(boxes, currentUserEmail),
+      ),
+    );
+  }
+
   function handleCompose() {
     setCompose(blankDraft(composeMailboxId));
   }
@@ -297,9 +315,14 @@ export default function App() {
       />
 
       <main aria-label="Conversation" className="flex flex-1 flex-col overflow-hidden">
-        <ThreadView messageId={openMessageId} onReply={handleReply} />
+        <ThreadView
+          messageId={openMessageId}
+          onReply={handleReply}
+          onReplyAll={handleReplyAll}
+        />
         {compose ? (
           <Compose
+            key={`${compose.mode ?? "new"}:${compose.threadId ?? compose.mailboxId ?? "new"}`}
             fromAddress={fromAddress}
             initial={compose}
             fromOptions={fromOptions}

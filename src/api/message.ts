@@ -13,7 +13,12 @@
 
 import { Hono } from "hono";
 import type { AccessEnv } from "../middleware/access";
-import { canUserReadThread, getAttachment, getMessage } from "../db";
+import {
+  canUserReadBcc,
+  canUserReadThread,
+  getAttachment,
+  getMessage,
+} from "../db";
 import { resolveViewer } from "./scope";
 
 function downloadName(filename: string): string {
@@ -54,7 +59,10 @@ export function messageRoutes(): Hono<AccessEnv> {
         return c.json({ error: "message not found" }, 404);
       }
 
-      return c.json({ message });
+      const canReadBcc = await canUserReadBcc(c.env, id, viewer);
+      return c.json({
+        message: canReadBcc ? message : { ...message, bcc_addresses: null },
+      });
     } catch {
       return c.json({ error: "failed to load message" }, 500);
     }

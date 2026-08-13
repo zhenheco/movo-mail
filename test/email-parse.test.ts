@@ -23,6 +23,20 @@ const HTML_EML = [
   "",
 ].join("\r\n");
 
+function plainEml(bccLine?: string): string {
+  return [
+    "From: Alice <alice@example.com>",
+    "To: support@movo.com.my",
+    ...(bccLine === undefined ? [] : [`Bcc: ${bccLine}`]),
+    "Subject: Bcc state",
+    "Message-ID: <bcc-state@example.com>",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "body",
+    "",
+  ].join("\r\n");
+}
+
 describe("parseInbound", () => {
   it("stores parsed html as raw client-sanitized render input", async () => {
     const parsed = await parseInbound(
@@ -35,4 +49,22 @@ describe("parseInbound", () => {
       '<style>.x{color:red}</style><p onclick="evil()">HTML</p><script>x()</script>',
     );
   });
+
+  it.each([
+    ["known-nonempty", "hidden@example.com", ["hidden@example.com"]],
+    ["known-empty", "", []],
+    ["unavailable", undefined, []],
+  ] as const)(
+    "sets Bcc provenance to %s when the trusted MIME source is %s",
+    async (provenance, bccLine, addresses) => {
+      const parsed = await parseInbound(
+        new TextEncoder().encode(plainEml(bccLine)),
+        "support@movo.com.my",
+        1_700_000_000_000,
+      );
+
+      expect(parsed.bccProvenance).toBe(provenance);
+      expect(parsed.bcc.map((address) => address.address)).toEqual(addresses);
+    },
+  );
 });

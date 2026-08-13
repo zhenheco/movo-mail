@@ -2,7 +2,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Compose } from "./Compose";
 import type { MailboxSummary } from "../lib/api";
-import type { ComposeDraft } from "../lib/compose";
+import {
+  MAX_ATTACHMENT_COUNT,
+  UNAVAILABLE_BCC_CONFIRMATION,
+  replyAllDraft,
+  type ComposeDraft,
+} from "../lib/compose";
+import type { MessageWithAttachments } from "../lib/types";
 
 const baseDraft: ComposeDraft = {
   to: "",
@@ -24,6 +30,86 @@ function renderCompose(fromOptions: MailboxSummary[]): string {
 }
 
 describe("Compose", () => {
+  it("renders accessible Traditional Chinese To/Cc/Bcc controls", () => {
+    const html = renderToStaticMarkup(
+      <Compose
+        fromAddress="me@movo.com.my"
+        initial={baseDraft}
+        fromOptions={[]}
+        onClose={() => undefined}
+        onSent={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("收件者");
+    expect(html).toContain("副本");
+    expect(html).toContain("密件副本");
+    expect(html).toContain('id="compose-cc"');
+    expect(html).toContain('id="compose-bcc"');
+  });
+
+  it("shows the exact unavailable-Bcc confirmation before Reply All can send", () => {
+    const message: MessageWithAttachments = {
+      id: "message-1",
+      thread_id: "thread-1",
+      mailbox_id: "mailbox-1",
+      message_id: "<message-1@example.com>",
+      in_reply_to: null,
+      references: null,
+      direction: "inbound",
+      from_address: "sender@example.com",
+      from_name: null,
+      to_addresses: JSON.stringify(["me@movo.com.my"]),
+      cc_addresses: null,
+      bcc_addresses: null,
+      subject: "Hello",
+      snippet: null,
+      text_body: "Hi",
+      html_body: null,
+      r2_raw_key: null,
+      has_attachments: 0,
+      unread: 0,
+      date: 1,
+      created_at: 1,
+      attachments: [],
+    };
+    const html = renderToStaticMarkup(
+      <Compose
+        fromAddress="me@movo.com.my"
+        initial={{
+          ...replyAllDraft(message, ["me@movo.com.my"]),
+          bcc: "manual-hidden@example.com",
+          body: "Confirmed reply body",
+        }}
+        fromOptions={[]}
+        onClose={() => undefined}
+        onSent={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("原始密件副本無法驗證");
+    expect(html).toContain(UNAVAILABLE_BCC_CONFIRMATION);
+    expect(html).toContain('aria-label="確認原始密件副本無法驗證"');
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
+  });
+
+  it("renders the attachment count and picker boundary", () => {
+    const html = renderToStaticMarkup(
+      <Compose
+        fromAddress="me@movo.com.my"
+        initial={baseDraft}
+        fromOptions={[]}
+        onClose={() => undefined}
+        onSent={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(`新增附件（0/${MAX_ATTACHMENT_COUNT}）`);
+    expect(html).toContain(`aria-label="新增附件，最多 ${MAX_ATTACHMENT_COUNT} 個"`);
+    expect(html).toContain('type="file"');
+    expect(html).toContain("multiple");
+  });
+
   it("marks shared From options without marking personal options", () => {
     const html = renderCompose([
       {

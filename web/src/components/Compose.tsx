@@ -1,24 +1,22 @@
 /**
- * Compose panel: to / subject / body, an "AI draft" button, and Send.
- *
- * Behaviour rules:
- *   - AI draft calls POST /api/ai/draft and writes the result into the editable
- *     subject + body fields. It NEVER sends — the user must review and click
- *     Send. (Spec 6.5: human approval required.)
- *   - Reply pre-fills To (original sender), a "Re: " subject, and threading
- *     headers (In-Reply-To / References) so the send carries them.
- *   - Every async action has its own loading + error surface.
+ * Compose panel for new messages, sender-only replies, and explicit Reply All.
+ * All editable recipient buckets remain visible so Cc/Bcc semantics are never
+ * hidden behind a generic recipient input.
  */
 
 import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ComposeDraft } from "../lib/compose";
 import {
+  ATTACHMENT_EMPTY_ERROR,
   MAX_ATTACHMENT_COUNT,
-  MAX_ATTACHMENT_PAYLOAD_BYTES,
+  MAX_RECIPIENT_COUNT,
+  UNAVAILABLE_BCC_CONFIRMATION,
+  attachmentPayloadLength,
   buildSendRequest,
   estimatedBase64Length,
   fileToAttachment,
+  validateAttachmentSelection,
 } from "../lib/compose";
 import type { OutboundAttachment } from "../lib/types";
 import { aiDraft, sendMessage, type MailboxSummary } from "../lib/api";
@@ -34,7 +32,7 @@ export interface ComposeProps {
   fromAddress: string;
   /** Pre-filled draft (reply or blank new message). */
   initial: ComposeDraft;
-  /** The caller's owned mailboxes — the From options (drives which mailbox sends). */
+  /** The caller's sendable mailboxes — the From options. */
   fromOptions: MailboxSummary[];
   onClose: () => void;
   /** Notify parent on a successful send so it can refresh / collapse. */
@@ -57,73 +55,85 @@ export function Compose({
   onClose,
   onSent,
 }: ComposeProps) {
-  // ── Field reference (what each piece is for; the From-cluster is the easy
-  //    one to confuse, so it's spelled out) ──────────────────────────────────
-  //
-  //  EDITABLE form fields (what the user sees + types):
-  //    to       — recipient line, comma-separated string. Parsed into
-  //               `recipients` for validation/send. A reply pre-fills the
-  //               original sender (initial.to).
-  //    subject  — subject line. A reply pre-fills "Re: …".
-  //    body     — the message text the user writes (or the AI draft fills in).
-  //    From     — which owned mailbox sends (the <select> / static line below).
-  //               Tracked as `fromId`, NOT a free-text field.
-  //
-  //  HIDDEN threading state (carried in `initial`, never shown as inputs):
-  //    initial.threadId    — set ⇒ this is a REPLY. Attaches the send to that
-  //                          thread, unlocks "AI draft", and locks the From box.
-  //    initial.inReplyTo   — RFC-5322 In-Reply-To header (last msg's Message-ID)
-  //    initial.references  — RFC-5322 References chain. Both make the reply nest
-  //                          correctly in the customer's mail client.
-  //    initial.history     — prior messages; fed to POST /api/ai/draft only.
-  //    idempotencyKeyRef   — one UUID per open panel; dedupes a double-click /
-  //                          retry so the same reply isn't sent twice.
-  //
-  //  The four From-* values, distinct on purpose:
-  //    fromAddress           (prop)  — fallback address, used ONLY if the
-  //                                    selected mailbox can't be resolved.
-  //    fromId                (state) — id of the mailbox the user picked.
-  //    fromBox               (deriv) — the MailboxSummary row matching fromId.
-  //    effectiveFromAddress  (deriv) — fromBox.address ?? fromAddress = the
-  //                                    address that actually sends.
   const idempotencyKeyRef = useRef(crypto.randomUUID());
-  const [to, setTo] = useState(initial.to); // recipient line (raw string)
+  const [to, setTo] = useState(initial.to);
+  const [cc, setCc] = useState(initial.cc ?? "");
+  const [bcc, setBcc] = useState(initial.bcc ?? "");
+  const [bccConfirmation, setBccConfirmation] = useState(
+    initial.bccConfirmation,
+  );
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
-  const [attachments, setAttachments] = useState<OutboundAttachment[]>([]);
+  const [attachments, setAttachments] = useState<OutboundAttachment[]>(
+    initial.attachments ?? [],
+  );
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const attachmentBusyRef = useRef(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  // Which owned mailbox sends. A reply is locked to the thread's mailbox
-  // (initial.mailboxId); a new message defaults to it, else the first owned.
+
   const [fromId, setFromId] = useState(
     initial.mailboxId ?? fromOptions[0]?.id ?? "",
   );
-  const fromBox = fromOptions.find((b) => b.id === fromId);
+  const fromBox = fromOptions.find((mailbox) => mailbox.id === fromId);
   const effectiveFromAddress = fromBox?.address ?? fromAddress;
   const isReply = Boolean(initial.threadId);
-  // A new message may pick its sender when the caller owns more than one box.
+  const isReplyAll = initial.mode === "reply-all";
   const canPickFrom = !isReply && fromOptions.length > 1;
 
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-
   const [sendPhase, setSendPhase] = useState<SendPhase>("idle");
   const [sendError, setSendError] = useState<string | null>(null);
 
-  const recipients = parseRecipientInput(to);
-  const hasValidRecipient =
-    recipients.length > 0 && recipients.every((r) => isLikelyEmail(r.address));
+  const toRecipients = parseRecipientInput(to);
+  const ccRecipients = parseRecipientInput(cc);
+  const bccRecipients = parseRecipientInput(bcc);
+  const recipientCount =
+    toRecipients.length + ccRecipients.length + bccRecipients.length;
+  const hasValidTo =
+    toRecipients.length > 0 &&
+    toRecipients.every((recipient) => isLikelyEmail(recipient.address));
+  const hasValidCc = ccRecipients.every((recipient) =>
+    isLikelyEmail(recipient.address),
+  );
+  const hasValidBcc = bccRecipients.every((recipient) =>
+    isLikelyEmail(recipient.address),
+  );
+  const withinRecipientLimit = recipientCount <= MAX_RECIPIENT_COUNT;
+  const bccUnavailable =
+    isReplyAll && initial.bccProvenance === "unavailable";
+  const bccConfirmationReady =
+    !bccUnavailable ||
+    (bccConfirmation === UNAVAILABLE_BCC_CONFIRMATION &&
+      bccRecipients.length > 0 &&
+      hasValidBcc);
+  const hasValidBody = body.trim().length > 0;
   const canSend =
-    hasValidRecipient &&
-    subject.trim().length > 0 &&
+    hasValidTo &&
+    hasValidCc &&
+    hasValidBcc &&
+    withinRecipientLimit &&
+    hasValidBody &&
+    bccConfirmationReady &&
     sendPhase !== "sending" &&
     !attachmentBusy &&
     !attachmentError;
 
+  const recipientError =
+    to.trim().length > 0 && !hasValidTo
+      ? "請輸入有效的收件者地址。"
+      : cc.trim().length > 0 && !hasValidCc
+        ? "請輸入有效的副本地址。"
+        : bcc.trim().length > 0 && !hasValidBcc
+          ? "請輸入有效的密件副本地址。"
+          : !withinRecipientLimit
+            ? `收件者總數不可超過 ${MAX_RECIPIENT_COUNT} 位。`
+            : null;
+
   async function handleAiDraft() {
     if (!initial.threadId) {
-      setAiError("AI draft is only available when replying to a thread.");
+      setAiError("AI 草稿只適用於回覆郵件。");
       return;
     }
     setAiLoading(true);
@@ -134,24 +144,19 @@ export function Compose({
         history: initial.history ?? [],
         instruction: undefined,
       });
-      // Fill the EDITABLE fields — the user still reviews + sends manually.
       if (draft.subject.trim().length > 0) {
         setSubject(draft.subject);
       }
       setBody(draft.text);
     } catch (err) {
-      setAiError(
-        err instanceof Error
-          ? err.message
-          : "Could not generate a draft. Please try again.",
-      );
+      setAiError(err instanceof Error ? err.message : "無法產生 AI 草稿。請稍後再試。");
     } finally {
       setAiLoading(false);
     }
   }
 
-  async function handleSend(e: FormEvent) {
-    e.preventDefault();
+  async function handleSend(event: FormEvent) {
+    event.preventDefault();
     if (!canSend) {
       return;
     }
@@ -160,13 +165,17 @@ export function Compose({
     try {
       const payload = buildSendRequest({
         fromAddress: effectiveFromAddress,
-        to: recipients,
+        to: toRecipients,
+        cc: ccRecipients,
+        bcc: bccRecipients,
         subject,
         text: body,
         attachments,
+        mode: initial.mode,
+        bccProvenance: initial.bccProvenance,
+        bccConfirmation,
+        idempotencyKey: idempotencyKeyRef.current,
         threadId: initial.threadId,
-        // Send from the selected mailbox; the server re-derives the From address
-        // from this id (a reply stays locked to its thread's mailbox).
         mailboxId: fromId || initial.mailboxId,
         inReplyTo: initial.inReplyTo,
         references: initial.references,
@@ -176,45 +185,60 @@ export function Compose({
       onSent(result.id);
     } catch (err) {
       setSendPhase("error");
-      setSendError(
-        err instanceof Error ? err.message : "Failed to send. Please try again.",
-      );
+      setSendError(err instanceof Error ? err.message : "寄信失敗，請稍後再試。");
     }
   }
 
   async function handleFiles(files: FileList | null) {
-    setAttachmentError(null);
-    setAttachmentBusy(false);
     if (!files || files.length === 0) {
-      setAttachments([]);
       return;
     }
+    if (attachmentBusyRef.current) {
+      setAttachmentError("請先等待目前的附件讀取完成。");
+      clearAttachmentInput();
+      return;
+    }
+
     const selected = Array.from(files);
-    if (selected.length > MAX_ATTACHMENT_COUNT) {
-      setAttachments([]);
-      setAttachmentError(`Attach up to ${MAX_ATTACHMENT_COUNT} files.`);
-      clearAttachmentInput();
-      return;
-    }
-    const estimatedPayload = selected.reduce(
-      (total, file) => total + estimatedBase64Length(file.size),
-      0,
+    const incomingPayloadLengths = selected.map((file) =>
+      estimatedBase64Length(file.size),
     );
-    if (estimatedPayload > MAX_ATTACHMENT_PAYLOAD_BYTES) {
-      setAttachments([]);
-      setAttachmentError("Attachments must be 5 MiB or less.");
+    const selectionError = validateAttachmentSelection(
+      attachments.length,
+      incomingPayloadLengths,
+      attachmentPayloadLength(attachments),
+    );
+    if (selectionError) {
+      setAttachmentError(selectionError);
       clearAttachmentInput();
       return;
     }
+
+    setAttachmentError(null);
+    attachmentBusyRef.current = true;
     setAttachmentBusy(true);
     try {
-      setAttachments(await Promise.all(selected.map(fileToAttachment)));
-    } catch {
-      setAttachments([]);
-      setAttachmentError("Could not read the selected attachment.");
-      clearAttachmentInput();
+      const added = await Promise.all(selected.map(fileToAttachment));
+      const actualError = validateAttachmentSelection(
+        attachments.length,
+        added.map((attachment) => attachment.contentBase64.length),
+        attachmentPayloadLength(attachments),
+      );
+      if (actualError) {
+        setAttachmentError(actualError);
+        return;
+      }
+      setAttachments((current) => [...current, ...added]);
+    } catch (err) {
+      setAttachmentError(
+        err instanceof Error && err.message === ATTACHMENT_EMPTY_ERROR
+          ? ATTACHMENT_EMPTY_ERROR
+          : "無法讀取所選附件。",
+      );
     } finally {
+      attachmentBusyRef.current = false;
       setAttachmentBusy(false);
+      clearAttachmentInput();
     }
   }
 
@@ -224,122 +248,192 @@ export function Compose({
     }
   }
 
+  function removeAttachment(index: number) {
+    setAttachments((current) => current.filter((_, i) => i !== index));
+    setAttachmentError(null);
+    clearAttachmentInput();
+  }
+
   function clearAttachments() {
     setAttachments([]);
     setAttachmentError(null);
     setAttachmentBusy(false);
+    attachmentBusyRef.current = false;
     clearAttachmentInput();
   }
 
+  const heading = isReplyAll ? "全部回覆" : isReply ? "回覆" : "新郵件";
+
   return (
-    <footer
-      aria-label="Compose"
-      className="border-t border-border bg-background"
-    >
+    <footer aria-label="寫信" className="border-t border-border bg-background">
       <form onSubmit={handleSend} className="flex flex-col gap-2 p-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">
-            {initial.threadId ? "Reply" : "New message"}
-          </h2>
+          <h2 className="text-sm font-semibold">{heading}</h2>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             onClick={onClose}
-            aria-label="Close compose"
+            aria-label="關閉寫信"
           >
-            Close
+            關閉
           </Button>
         </div>
 
-        {/* From — sending mailbox. New message w/ >1 mailbox: editable <select>;
-            otherwise (incl. every reply) a fixed line locked to fromId. */}
         {canPickFrom ? (
           <label className="flex items-center gap-2 text-xs">
-            <span className="font-medium text-muted-foreground">From</span>
+            <span className="font-medium text-muted-foreground">寄件者</span>
             <select
               value={fromId}
-              onChange={(e) => setFromId(e.target.value)}
-              aria-label="Send from mailbox"
+              onChange={(event) => setFromId(event.target.value)}
+              aria-label="選擇寄件信箱"
               className="flex-1 truncate rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
             >
-              {fromOptions.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {fromOptionLabel(b)}
+              {fromOptions.map((mailbox) => (
+                <option key={mailbox.id} value={mailbox.id}>
+                  {fromOptionLabel(mailbox)}
                 </option>
               ))}
             </select>
           </label>
         ) : (
           <p className="flex items-center gap-1 text-xs text-muted-foreground">
-            From <span className="font-medium">{effectiveFromAddress}</span>
+            寄件者 <span className="font-medium">{effectiveFromAddress}</span>
             {fromBox?.kind === "shared" ? <Badge variant="shared">共用</Badge> : null}
           </p>
         )}
 
-        {/* To — recipient line (comma-separated). Reply pre-fills the original
-            sender; parsed into `recipients` for validation. */}
         <label className="sr-only" htmlFor="compose-to">
-          Recipients
+          收件者
         </label>
         <Input
           id="compose-to"
           value={to}
-          onChange={(e) => setTo(e.target.value)}
-          placeholder="To (comma-separated)"
-          aria-invalid={to.length > 0 && !hasValidRecipient}
+          onChange={(event) => setTo(event.target.value)}
+          placeholder="收件者（以逗號分隔）"
+          aria-label="收件者"
+          aria-invalid={to.length > 0 && !hasValidTo}
+          aria-describedby={recipientError ? "compose-recipient-error" : undefined}
         />
 
-        {/* Subject — reply pre-fills "Re: …"; required to enable Send. */}
+        <label className="sr-only" htmlFor="compose-cc">
+          副本
+        </label>
+        <Input
+          id="compose-cc"
+          value={cc}
+          onChange={(event) => setCc(event.target.value)}
+          placeholder="副本（Cc，以逗號分隔）"
+          aria-label="副本"
+          aria-invalid={cc.length > 0 && !hasValidCc}
+          aria-describedby={recipientError ? "compose-recipient-error" : undefined}
+        />
+
+        <label className="sr-only" htmlFor="compose-bcc">
+          密件副本
+        </label>
+        <Input
+          id="compose-bcc"
+          value={bcc}
+          onChange={(event) => setBcc(event.target.value)}
+          placeholder="密件副本（Bcc，以逗號分隔）"
+          aria-label="密件副本"
+          aria-invalid={bcc.length > 0 && !hasValidBcc}
+          aria-describedby={recipientError ? "compose-recipient-error" : undefined}
+        />
+
+        {bccUnavailable ? (
+          <div
+            role="note"
+            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+          >
+            <p>
+              原始密件副本無法驗證。請確認後，在上方「密件副本」欄位手動輸入至少一位收件者，系統才會允許寄出。
+            </p>
+            <label className="mt-2 flex items-start gap-2">
+              <Input
+                type="checkbox"
+                checked={bccConfirmation === UNAVAILABLE_BCC_CONFIRMATION}
+                onChange={(event) =>
+                  setBccConfirmation(
+                    event.target.checked
+                      ? UNAVAILABLE_BCC_CONFIRMATION
+                      : undefined,
+                  )
+                }
+                aria-label="確認原始密件副本無法驗證"
+                className="mt-0.5 h-4 w-4 shrink-0"
+              />
+              <span>
+                我確認原始密件副本無法驗證，並會手動補上密件副本收件者。
+                <span className="sr-only">
+                  確認值：{UNAVAILABLE_BCC_CONFIRMATION}
+                </span>
+              </span>
+            </label>
+          </div>
+        ) : null}
+
         <label className="sr-only" htmlFor="compose-subject">
-          Subject
+          主旨
         </label>
         <Input
           id="compose-subject"
           value={subject}
-          onChange={(e) => setSubject(e.target.value)}
-          placeholder="Subject"
+          onChange={(event) => setSubject(event.target.value)}
+          placeholder="主旨"
+          aria-label="主旨"
         />
 
-        {/* Body — message text the user writes, or the AI draft fills in. */}
         <label className="sr-only" htmlFor="compose-body">
-          Message body
+          郵件內容
         </label>
         <Textarea
           id="compose-body"
           value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Write your message…"
+          onChange={(event) => setBody(event.target.value)}
+          placeholder="輸入郵件內容…"
+          aria-label="郵件內容"
           rows={6}
         />
 
-        <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs">
+        <label className="flex items-center justify-between gap-3 rounded-md border border-dashed border-border px-3 py-2 text-xs">
           <span className="truncate text-muted-foreground">
-            {attachments.length > 0
-              ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"} selected`
-              : attachmentBusy
-                ? "Reading attachments..."
-              : "Attach files"}
+            {attachmentBusy
+              ? "正在讀取附件…"
+              : `新增附件（${attachments.length}/${MAX_ATTACHMENT_COUNT}）`}
           </span>
           <Input
             ref={attachmentInputRef}
             type="file"
             multiple
+            aria-label={`新增附件，最多 ${MAX_ATTACHMENT_COUNT} 個`}
             className="max-w-48 text-xs"
-            onChange={(e) => void handleFiles(e.currentTarget.files)}
+            onChange={(event) => void handleFiles(event.currentTarget.files)}
           />
         </label>
 
         {attachments.length > 0 ? (
           <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-muted/30 px-3 py-2">
             <ul className="min-w-0 flex-1 space-y-1 text-xs text-muted-foreground">
-              {attachments.map((att, index) => (
+              {attachments.map((attachment, index) => (
                 <li
-                  key={`${att.filename}:${index}`}
-                  className="truncate"
-                  title={att.filename}
+                  key={`${attachment.filename}:${index}`}
+                  className="flex items-center justify-between gap-2"
+                  title={attachment.filename}
                 >
-                  {att.filename}
+                  <span className="truncate">{attachment.filename}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeAttachment(index)}
+                    disabled={attachmentBusy}
+                    className="h-7 shrink-0 px-2 text-xs"
+                    aria-label={`移除附件 ${attachment.filename}`}
+                  >
+                    移除
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -348,13 +442,40 @@ export function Compose({
               variant="ghost"
               size="sm"
               onClick={clearAttachments}
+              disabled={attachmentBusy}
               className="h-7 px-2 text-xs"
             >
-              Clear
+              清除全部
             </Button>
           </div>
         ) : null}
 
+        {recipientError ? (
+          <p id="compose-recipient-error" role="alert" className="text-xs text-red-600">
+            {recipientError}
+          </p>
+        ) : null}
+        {!hasValidBody && body.length > 0 ? (
+          <p role="alert" className="text-xs text-red-600">
+            請輸入郵件內容。
+          </p>
+        ) : null}
+        {attachmentError ? (
+          <div className="flex items-center justify-between gap-2">
+            <p role="alert" className="text-xs text-red-600">
+              {attachmentError}
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setAttachmentError(null)}
+              aria-label="清除附件錯誤"
+            >
+              知道了
+            </Button>
+          </div>
+        ) : null}
         {aiError ? (
           <p role="alert" className="text-xs text-red-600">
             {aiError}
@@ -365,14 +486,9 @@ export function Compose({
             {sendError}
           </p>
         ) : null}
-        {attachmentError ? (
-          <p role="alert" className="text-xs text-red-600">
-            {attachmentError}
-          </p>
-        ) : null}
         {sendPhase === "sent" ? (
           <p role="status" className="text-xs text-green-600">
-            Message sent.
+            郵件已送出。
           </p>
         ) : null}
 
@@ -383,19 +499,16 @@ export function Compose({
             size="sm"
             onClick={handleAiDraft}
             disabled={aiLoading || !initial.threadId}
-            title={
-              initial.threadId
-                ? "Generate a draft reply with AI"
-                : "AI draft is available when replying"
-            }
+            aria-label="產生 AI 草稿"
+            title={initial.threadId ? "產生回覆草稿" : "回覆郵件時才能使用 AI 草稿"}
           >
             {aiLoading ? <Spinner /> : null}
-            AI draft
+            AI 草稿
           </Button>
 
           <Button type="submit" size="sm" disabled={!canSend}>
             {sendPhase === "sending" ? <Spinner /> : null}
-            Send
+            寄出
           </Button>
         </div>
       </form>

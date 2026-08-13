@@ -293,6 +293,7 @@ describe("api client fetch", () => {
     await expect(
       sendMessage(
         {
+          contract_version: "movo-send-v1",
           from: { address: "me@movo.com.my" },
           to: [{ address: "x@y.com" }],
           subject: "s",
@@ -319,6 +320,7 @@ describe("api client fetch", () => {
 
     const result = await sendMessage(
       {
+        contract_version: "movo-send-v1",
         from: { address: "me@movo.com.my" },
         to: [{ address: "x@y.com" }],
         subject: "s",

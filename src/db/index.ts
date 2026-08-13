@@ -28,6 +28,8 @@ import type {
   ParsedAttachment,
   ParsedInbound,
   SendStatus,
+  SendAttemptRow,
+  SendAttemptStatus,
 } from "../types";
 
 /**
@@ -38,6 +40,16 @@ export class MailboxExistsError extends Error {
   constructor(public readonly address: string) {
     super(`mailbox already exists: ${address}`);
     this.name = "MailboxExistsError";
+  }
+}
+
+/** Raised when an explicit send thread is malformed, missing, or not owned. */
+export class InvalidThreadError extends Error {
+  readonly code = "invalid_thread" as const;
+
+  constructor(reason = "invalid thread") {
+    super(reason);
+    this.name = "InvalidThreadError";
   }
 }
 
@@ -121,6 +133,26 @@ export interface SendLogInput {
   error: string | null;
 }
 
+export interface SendAttemptClaimInput {
+  mailboxId: string;
+  idempotencyKey: string;
+  canonicalHash: string;
+}
+
+export type SendAttemptClaim =
+  | { kind: "claimed"; attempt: SendAttemptRow }
+  | { kind: "replay"; attempt: SendAttemptRow }
+  | { kind: "mismatch"; attempt: SendAttemptRow };
+
+export interface SendAttemptTransitionInput {
+  id: string;
+  from: SendAttemptStatus;
+  to: SendAttemptStatus;
+  providerId?: string | null;
+  messageId?: string | null;
+  error?: string | null;
+}
+
 /** Fields used to write an audit-log row. */
 export interface AuditInput {
   userId: string | null;
@@ -155,6 +187,20 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+function serializeInboundBcc(parsed: ParsedInbound): string | null {
+  if (parsed.bccProvenance === "unavailable") return null;
+  if (parsed.bccProvenance === "known-empty") return "[]";
+  if (parsed.bccProvenance === "known-nonempty") {
+    return JSON.stringify(parsed.bcc.map((a) => a.address));
+  }
+  // Older parser callers did not carry provenance. Non-empty data is still
+  // authoritative; an empty legacy value remains unavailable rather than
+  // claiming that the source was inspected.
+  return parsed.bcc.length > 0
+    ? JSON.stringify(parsed.bcc.map((a) => a.address))
+    : null;
+}
+
 /** Booleans are stored as SQLite 0/1 integers. */
 const bool = (b: boolean): number => (b ? 1 : 0);
 
@@ -173,7 +219,10 @@ async function guard<T>(op: string, fn: () => Promise<T>): Promise<T> {
   } catch (cause) {
     // Typed domain errors carry their own meaning (e.g. a 409 mapping) and must
     // reach the caller intact rather than being flattened into a generic 500.
-    if (cause instanceof MailboxExistsError) {
+    if (
+      cause instanceof MailboxExistsError ||
+      cause instanceof InvalidThreadError
+    ) {
       throw cause;
     }
     const detail = cause instanceof Error ? cause.message : String(cause);
@@ -298,6 +347,40 @@ export async function canUserReadThread(
 }
 
 /**
+ * Bcc visibility is narrower than shared-mailbox thread visibility: personal
+ * Bcc is owner-only, while shared-mailbox Bcc is available to the assigned
+ * sender and admins. Other shared-mailbox viewers receive a redacted field.
+ */
+export async function canUserReadBcc(
+  env: Env,
+  messageId: string,
+  viewer: ThreadVisibilityViewer,
+): Promise<boolean> {
+  return guard("canUserReadBcc", async () => {
+    if (!viewer.userId) return false;
+    const row = await env.DB.prepare(
+      `SELECT 1 AS allowed
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         JOIN mailboxes mb ON mb.id = m.mailbox_id
+        WHERE m.id = ?
+          AND ((mb.kind = 'personal' AND mb.owner_id = ?)
+            OR (mb.kind = 'shared'
+                AND (? = 1 OR t.assignee_id = ?)))
+        LIMIT 1`,
+    )
+      .bind(
+        messageId,
+        viewer.userId,
+        viewer.isAdmin ? 1 : 0,
+        viewer.userId,
+      )
+      .first<{ allowed: number }>();
+    return row !== null;
+  });
+}
+
+/**
  * List threads across EVERY mailbox the user owns, newest activity first —
  * the unified ("All mailboxes") inbox. One query joins threads → mailboxes →
  * users so it stays scoped to ownership (a user can never see another's
@@ -372,6 +455,53 @@ export async function getThread(
     );
 
     return { ...thread, messages };
+  });
+}
+
+const SEND_THREAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Resolve an explicit send/reply thread without allowing an invalid value to
+ * turn into a brand-new unthreaded message. The send route should call this
+ * before deriving headers or claiming a provider attempt.
+ */
+export async function getOwnedThreadForSend(
+  env: Env,
+  threadId: string,
+  mailboxId: string,
+  viewer: ThreadVisibilityViewer,
+): Promise<ThreadWithMessages> {
+  return guard("getOwnedThreadForSend", async () => {
+    if (!SEND_THREAD_ID_PATTERN.test(threadId)) {
+      throw new InvalidThreadError("invalid thread id");
+    }
+
+    const allowed = await env.DB.prepare(
+      `SELECT 1 AS allowed
+         FROM threads t
+         JOIN mailboxes mb ON mb.id = t.mailbox_id
+        WHERE t.id = ?
+          AND t.mailbox_id = ?
+          AND ${VISIBLE_THREAD_PREDICATE}
+        LIMIT 1`,
+    )
+      .bind(
+        threadId,
+        mailboxId,
+        viewer.userId,
+        viewer.isAdmin ? 1 : 0,
+        viewer.userId,
+      )
+      .first<{ allowed: number }>();
+    if (!allowed) {
+      throw new InvalidThreadError("thread is not visible to this user");
+    }
+
+    const thread = await getThread(env, threadId);
+    if (!thread || thread.mailbox_id !== mailboxId) {
+      throw new InvalidThreadError("thread is not owned by this mailbox");
+    }
+    return thread;
   });
 }
 
@@ -456,7 +586,7 @@ export async function searchMessages(
         ).bind(like, like, like, like);
 
     const { results } = await stmt.all<Message>();
-    return (results ?? []).map((r) => ({ ...r }));
+    return (results ?? []).map((r) => ({ ...r, bcc_addresses: null }));
   });
 }
 
@@ -488,7 +618,7 @@ export async function searchMessagesForOwner(
     )
       .bind(like, like, like, like, normalizeEmail(ownerEmail))
       .all<Message>();
-    return (results ?? []).map((r) => ({ ...r }));
+    return (results ?? []).map((r) => ({ ...r, bcc_addresses: null }));
   });
 }
 
@@ -658,6 +788,124 @@ export async function getSendLog(
       .bind(id)
       .first<SendLogRow>();
     return row ? { ...row } : null;
+  });
+}
+
+/**
+ * Atomically claim a mailbox-scoped idempotency key before provider submission.
+ * The insert winner is the only request allowed to move the row to pending and
+ * call the relay; later requests get a replay or a hash mismatch.
+ */
+export async function claimSendAttempt(
+  env: Env,
+  input: SendAttemptClaimInput,
+): Promise<SendAttemptClaim> {
+  return guard("claimSendAttempt", async () => {
+    const id = uuid();
+    const now = Date.now();
+    const inserted = await env.DB.prepare(
+      `INSERT INTO send_attempts
+         (id, mailbox_id, idempotency_key, canonical_hash, status,
+          provider_id, message_id, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?)
+       ON CONFLICT(mailbox_id, idempotency_key) DO NOTHING`,
+    )
+      .bind(
+        id,
+        input.mailboxId,
+        input.idempotencyKey,
+        input.canonicalHash,
+        now,
+        now,
+      )
+      .run();
+
+    const attempt = await env.DB.prepare(
+      `SELECT id, mailbox_id, idempotency_key, canonical_hash, provider_id,
+              message_id, status, error, created_at, updated_at
+         FROM send_attempts
+        WHERE mailbox_id = ? AND idempotency_key = ?
+        LIMIT 1`,
+    )
+      .bind(input.mailboxId, input.idempotencyKey)
+      .first<SendAttemptRow>();
+    if (!attempt) {
+      throw new Error("send attempt claim was not persisted");
+    }
+
+    if ((inserted.meta?.changes ?? 0) > 0 && attempt.id === id) {
+      return { kind: "claimed", attempt: { ...attempt } };
+    }
+    return attempt.canonical_hash === input.canonicalHash
+      ? { kind: "replay", attempt: { ...attempt } }
+      : { kind: "mismatch", attempt: { ...attempt } };
+  });
+}
+
+/** Read one durable send attempt by its local id. */
+export async function getSendAttempt(
+  env: Env,
+  id: string,
+): Promise<SendAttemptRow | null> {
+  return guard("getSendAttempt", async () => {
+    const row = await env.DB.prepare(
+      `SELECT id, mailbox_id, idempotency_key, canonical_hash, provider_id,
+              message_id, status, error, created_at, updated_at
+         FROM send_attempts
+        WHERE id = ?`,
+    )
+      .bind(id)
+      .first<SendAttemptRow>();
+    return row ? { ...row } : null;
+  });
+}
+
+const SEND_ATTEMPT_TRANSITIONS: Record<
+  SendAttemptStatus,
+  readonly SendAttemptStatus[]
+> = {
+  queued: ["pending"],
+  pending: ["pending", "sent", "failed", "sent_unarchived"],
+  sent: [],
+  failed: [],
+  sent_unarchived: [],
+};
+
+/** Advance a durable send attempt only through its declared state machine. */
+export async function transitionSendAttempt(
+  env: Env,
+  input: SendAttemptTransitionInput,
+): Promise<void> {
+  await guard("transitionSendAttempt", async () => {
+    if (!SEND_ATTEMPT_TRANSITIONS[input.from].includes(input.to)) {
+      throw new Error(
+        `invalid send attempt transition: ${input.from} -> ${input.to}`,
+      );
+    }
+    const updated = await env.DB.prepare(
+      `UPDATE send_attempts
+          SET status = ?,
+              provider_id = COALESCE(?, provider_id),
+              message_id = COALESCE(?, message_id),
+              error = ?,
+              updated_at = ?
+        WHERE id = ? AND status = ?`,
+    )
+      .bind(
+        input.to,
+        input.providerId ?? null,
+        input.messageId ?? null,
+        input.error ?? null,
+        Date.now(),
+        input.id,
+        input.from,
+      )
+      .run();
+    if ((updated.meta?.changes ?? 0) === 0) {
+      throw new Error(
+        `invalid send attempt transition: ${input.from} -> ${input.to}`,
+      );
+    }
   });
 }
 
@@ -859,9 +1107,7 @@ export async function insertInboundMessage(
         parsed.cc.length > 0
           ? JSON.stringify(parsed.cc.map((a) => a.address))
           : null,
-        parsed.bcc.length > 0
-          ? JSON.stringify(parsed.bcc.map((a) => a.address))
-          : null,
+        serializeInboundBcc(parsed),
         parsed.subject,
         parsed.snippet,
         parsed.text,
@@ -959,7 +1205,7 @@ export async function insertOutboundMessage(
         msg.fromName,
         JSON.stringify(msg.toAddresses),
         msg.ccAddresses.length > 0 ? JSON.stringify(msg.ccAddresses) : null,
-        msg.bccAddresses.length > 0 ? JSON.stringify(msg.bccAddresses) : null,
+        JSON.stringify(msg.bccAddresses),
         msg.subject,
         msg.snippet,
         msg.text,

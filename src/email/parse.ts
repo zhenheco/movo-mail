@@ -118,6 +118,11 @@ export async function parseInbound(
   const from = flattenAddress(email.from)[0] ?? { address: "" };
   const text = email.text ?? null;
   const html = email.html && email.html.length > 0 ? email.html : null;
+  const bccProvenance = !email.headers.some((header) => header.key === "bcc")
+    ? "unavailable"
+    : email.bcc && email.bcc.length > 0
+      ? "known-nonempty"
+      : "known-empty";
 
   return {
     mailboxAddress,
@@ -128,6 +133,7 @@ export async function parseInbound(
     to: flattenAddressList(email.to),
     cc: flattenAddressList(email.cc),
     bcc: flattenAddressList(email.bcc),
+    bccProvenance,
     subject: email.subject ?? null,
     text,
     html,

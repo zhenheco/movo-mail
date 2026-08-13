@@ -138,6 +138,30 @@ const REPLY_EML = [
   "",
 ].join("\r\n");
 
+const NONEMPTY_BCC_EML = [
+  "From: Alice <alice@example.com>",
+  "To: support@movo.com.my",
+  "Bcc: hidden@example.com",
+  "Subject: Hidden recipient",
+  "Message-ID: <bcc-123@example.com>",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "body",
+  "",
+].join("\r\n");
+
+const EMPTY_BCC_EML = [
+  "From: Alice <alice@example.com>",
+  "To: support@movo.com.my",
+  "Bcc:",
+  "Subject: Empty hidden recipient",
+  "Message-ID: <bcc-empty@example.com>",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "body",
+  "",
+].join("\r\n");
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("handleInbound", () => {
@@ -236,6 +260,23 @@ describe("handleInbound", () => {
     expect(parsed.inReplyTo).toBe("<root-123@example.com>");
     expect(parsed.references).toEqual(["<root-123@example.com>"]);
   });
+
+  it.each([
+    ["known-nonempty", NONEMPTY_BCC_EML, ["hidden@example.com"]],
+    ["known-empty", EMPTY_BCC_EML, []],
+  ] as const)(
+    "passes parser-known %s Bcc provenance to the data layer",
+    async (provenance, raw, addresses) => {
+      const { bucket } = makeR2();
+      const env = makeEnv(bucket);
+
+      await handleInbound(makeMessage(raw, "support@movo.com.my"), env);
+
+      const parsed = vi.mocked(db.insertInboundMessage).mock.calls[0]![1] as ParsedInbound;
+      expect(parsed.bccProvenance).toBe(provenance);
+      expect(parsed.bcc.map((address) => address.address)).toEqual(addresses);
+    },
+  );
 
   it("does not compute or pass an assignee for inbound messages", async () => {
     const { bucket } = makeR2();

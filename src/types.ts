@@ -63,7 +63,21 @@ export type EpochMs = number;
 export type Direction = "inbound" | "outbound";
 
 /** Outbound send lifecycle status. */
-export type SendStatus = "queued" | "sent" | "failed";
+export type SendStatus =
+  | "queued"
+  | "pending"
+  | "sent"
+  | "failed"
+  | "sent_unarchived";
+
+/** Provenance state for an original message's Bcc recipients. */
+export type BccProvenance =
+  | "known-nonempty"
+  | "known-empty"
+  | "unavailable";
+
+/** Durable local claim state for one logical relay send. */
+export type SendAttemptStatus = SendStatus;
 
 /** A parsed email address with optional display name. */
 export interface EmailAddress {
@@ -199,6 +213,30 @@ export interface SendLogRow {
   updated_at: EpochMs;
 }
 
+export interface SendAttemptRow {
+  id: string;
+  mailbox_id: string;
+  idempotency_key: string;
+  canonical_hash: string;
+  provider_id: string | null;
+  message_id: string | null;
+  status: SendAttemptStatus;
+  error: string | null;
+  created_at: EpochMs;
+  updated_at: EpochMs;
+}
+
+/** Status values currently accepted from the canonical cf-email relay. */
+export type CfEmailRelayStatus =
+  | "sent"
+  | "pending"
+  | "failed"
+  | "suppressed"
+  | "blocked"
+  | "bounced"
+  | "rejected"
+  | "complained";
+
 export interface AuditRow {
   id: string;
   user_id: string | null;
@@ -237,6 +275,8 @@ export interface ParsedInbound {
   to: EmailAddress[];
   cc: EmailAddress[];
   bcc: EmailAddress[];
+  /** Explicitly supplied by trusted ingest data when Bcc was inspected. */
+  bccProvenance?: BccProvenance;
   subject: string | null;
   text: string | null;
   /** Raw parsed HTML body, or null. Sanitized client-side before rendering. */
@@ -287,12 +327,17 @@ export interface SendRequest {
   threadId?: string;
   /** Mailbox this send originates from, for local persistence. */
   mailboxId?: string;
+  /** Explicit recipient semantics for a reply send. */
+  replyMode?: "new" | "reply" | "reply-all";
+  bccProvenance?: BccProvenance;
+  bccConfirmation?: "confirmed-missing-original-bcc";
 }
 
 /** Result returned by the cf-email relay. */
 export interface SendResult {
   id: string;
-  status: string;
+  status: CfEmailRelayStatus;
+  messageId?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -46,10 +46,17 @@ import {
   getThreadsVisible,
   getVisibleThreadsForUser,
   getThreadsForOwner,
+  canUserReadBcc,
+  getOwnedThreadForSend,
+  InvalidThreadError,
   searchMessagesForOwner,
+  claimSendAttempt,
+  getSendAttempt,
+  transitionSendAttempt,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
+import { parseInbound } from "../src/email/parse";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // node:sqlite (loaded without going through vite's transform)
@@ -127,6 +134,7 @@ function migrationSql(): string {
     "0002_user_role.sql",
     "0003_mailboxes_address_unique.sql",
     "0004_shared_mailboxes.sql",
+    "0005_send_attempts.sql",
   ]
     .map((name) => readFileSync(join(here, "..", "migrations", name), "utf8"))
     .join("\n");
@@ -478,6 +486,37 @@ describe("db (real SQL via node:sqlite)", () => {
 
       expect(ownerThreads.map((t) => t.subject)).toEqual(["Kee personal"]);
       expect(otherThreads).toHaveLength(0);
+    });
+  });
+
+  describe("canUserReadBcc", () => {
+    it("allows the assigned shared-mailbox sender and admin, but not another viewer", async () => {
+      await seedUser(env, "u-sender", "sender@movo.com.my");
+      await seedUser(env, "u-other", "other@movo.com.my");
+      await seedMailbox(env, "mb-shared", "hello@movo.com.my", null, "shared");
+      const messageId = await insertInboundMessage(
+        env,
+        makeInbound({
+          mailboxAddress: "hello@movo.com.my",
+          messageId: "<shared-bcc@example.com>",
+          bcc: [addr("secret@example.com")],
+          bccProvenance: "known-nonempty",
+        }),
+      );
+      const threadId = (await getThreads(env, "mb-shared"))[0]!.id;
+      await env.DB.prepare(`UPDATE threads SET assignee_id = ? WHERE id = ?`)
+        .bind("u-sender", threadId)
+        .run();
+
+      await expect(
+        canUserReadBcc(env, messageId, { userId: "u-sender", isAdmin: false }),
+      ).resolves.toBe(true);
+      await expect(
+        canUserReadBcc(env, messageId, { userId: "u-other", isAdmin: false }),
+      ).resolves.toBe(false);
+      await expect(
+        canUserReadBcc(env, messageId, { userId: "u-other", isAdmin: true }),
+      ).resolves.toBe(true);
     });
   });
 
@@ -924,6 +963,153 @@ describe("db (real SQL via node:sqlite)", () => {
         JSON.stringify(["support@movo.com.my", "support@movo.com.my"]),
       );
     });
+
+    it("preserves known-empty, known-nonempty, and unavailable Bcc provenance", async () => {
+      const knownEmpty = await insertInboundMessage(
+        env,
+        makeInbound({
+          messageId: "<known-empty@example.com>",
+          bcc: [],
+          bccProvenance: "known-empty",
+        }),
+      );
+      const knownNonempty = await insertInboundMessage(
+        env,
+        makeInbound({
+          messageId: "<known-nonempty@example.com>",
+          bcc: [addr("hidden@example.com")],
+          bccProvenance: "known-nonempty",
+          date: 1_700_000_000_001,
+        }),
+      );
+      const unavailable = await insertInboundMessage(
+        env,
+        makeInbound({
+          messageId: "<unavailable@example.com>",
+          bcc: [],
+          date: 1_700_000_000_002,
+        }),
+      );
+
+      expect((await getMessage(env, knownEmpty))?.bcc_addresses).toBe("[]");
+      expect((await getMessage(env, knownNonempty))?.bcc_addresses).toBe(
+        JSON.stringify(["hidden@example.com"]),
+      );
+      expect((await getMessage(env, unavailable))?.bcc_addresses).toBeNull();
+    });
+
+    it("persists Bcc provenance produced by the trusted MIME parser", async () => {
+      const parse = (bccLine?: string) =>
+        parseInbound(
+          new TextEncoder().encode(
+            [
+              "From: Alice <alice@example.com>",
+              "To: support@movo.com.my",
+              ...(bccLine === undefined ? [] : [`Bcc: ${bccLine}`]),
+              "Subject: Parsed Bcc",
+              "Message-ID: <parsed-bcc@example.com>",
+              "Content-Type: text/plain; charset=utf-8",
+              "",
+              "body",
+              "",
+            ].join("\r\n"),
+          ),
+          "support@movo.com.my",
+          1_700_000_000_000,
+        );
+
+      const knownNonempty = await insertInboundMessage(env, await parse("hidden@example.com"));
+      const knownEmpty = await insertInboundMessage(
+        env,
+        await parse(""),
+        "parsed-bcc-empty",
+      );
+      const unavailable = await insertInboundMessage(
+        env,
+        await parse(),
+        "parsed-bcc-unavailable",
+      );
+
+      expect((await getMessage(env, knownNonempty))?.bcc_addresses).toBe(
+        JSON.stringify(["hidden@example.com"]),
+      );
+      expect((await getMessage(env, knownEmpty))?.bcc_addresses).toBe("[]");
+      expect((await getMessage(env, unavailable))?.bcc_addresses).toBeNull();
+    });
+
+    it("fails closed for malformed or cross-mailbox send threads", async () => {
+      await seedUser(env, "u-owner", "owner@movo.com.my");
+      await seedMailbox(env, "mb-owned", "owner@movo.com.my", "u-owner");
+      const messageId = await insertInboundMessage(
+        env,
+        makeInbound({ mailboxAddress: "owner@movo.com.my" }),
+      );
+      const threadId = (await getThreads(env, "mb-owned"))[0]!.id;
+
+      await expect(
+        getOwnedThreadForSend(env, threadId, "mb-owned", {
+          userId: "u-owner",
+          isAdmin: false,
+        }),
+      ).resolves.toMatchObject({
+        id: threadId,
+        mailbox_id: "mb-owned",
+      });
+      await expect(
+        getOwnedThreadForSend(env, `${threadId} bad`, "mb-owned", {
+          userId: "u-owner",
+          isAdmin: false,
+        }),
+      ).rejects.toBeInstanceOf(InvalidThreadError);
+      await expect(
+        getOwnedThreadForSend(env, messageId, "mb-owned", {
+          userId: "u-owner",
+          isAdmin: false,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_thread" });
+
+      await seedMailbox(env, "mb-other", "other@movo.com.my");
+      await expect(
+        getOwnedThreadForSend(env, threadId, "mb-other", {
+          userId: "u-owner",
+          isAdmin: false,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_thread" });
+    });
+
+    it("uses the visible-thread predicate for shared send authorization", async () => {
+      await seedSharedVisibilityFixture(env);
+      const sharedThreads = await getThreads(env, "mb-shared");
+      const bySubject = new Map(sharedThreads.map((thread) => [thread.subject, thread.id]));
+      const keeAssigned = bySubject.get("Kee claimed")!;
+      const prissAssigned = bySubject.get("Priss claimed")!;
+      const unassigned = bySubject.get("Unassigned")!;
+
+      await expect(
+        getOwnedThreadForSend(env, keeAssigned, "mb-shared", {
+          userId: "u-priss",
+          isAdmin: false,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_thread" });
+      await expect(
+        getOwnedThreadForSend(env, keeAssigned, "mb-shared", {
+          userId: "u-kee",
+          isAdmin: false,
+        }),
+      ).resolves.toMatchObject({ id: keeAssigned });
+      await expect(
+        getOwnedThreadForSend(env, prissAssigned, "mb-shared", {
+          userId: "u-admin",
+          isAdmin: true,
+        }),
+      ).resolves.toMatchObject({ id: prissAssigned });
+      await expect(
+        getOwnedThreadForSend(env, unassigned, "mb-shared", {
+          userId: "u-priss",
+          isAdmin: false,
+        }),
+      ).resolves.toMatchObject({ id: unassigned });
+    });
   });
 
   describe("searchMessages", () => {
@@ -946,6 +1132,22 @@ describe("db (real SQL via node:sqlite)", () => {
           date: 1_700_000_300_000,
         }),
       );
+    });
+
+    it("never returns raw Bcc data in search results", async () => {
+      await insertInboundMessage(
+        env,
+        makeInbound({
+          messageId: "<search-bcc@example.com>",
+          subject: "Secret search result",
+          bcc: [addr("secret@example.com")],
+          bccProvenance: "known-nonempty",
+        }),
+      );
+
+      const results = await searchMessages(env, "Secret search result", "mb-1");
+      expect(results).toHaveLength(1);
+      expect(results[0]?.bcc_addresses).toBeNull();
     });
 
     it("matches on subject", async () => {
@@ -1180,6 +1382,7 @@ describe("db (real SQL via node:sqlite)", () => {
       expect(msg?.from_address).toBe("support@movo.com.my");
       expect(msg?.unread).toBe(0);
       expect(msg?.to_addresses).toBe(JSON.stringify(["alice@example.com"]));
+      expect(msg?.bcc_addresses).toBe("[]");
       expect(msg?.r2_raw_key).toBe(`msg/${mid}.eml`);
     });
 
@@ -1388,6 +1591,105 @@ describe("db (real SQL via node:sqlite)", () => {
 
     it("returns null for a missing send-log id", async () => {
       expect(await getSendLog(env, "nope")).toBeNull();
+    });
+  });
+
+  describe("send_attempts", () => {
+    it("atomically claims one key, replays the same hash, and rejects a mismatch", async () => {
+      const first = await claimSendAttempt(env, {
+        mailboxId: "mb-1",
+        idempotencyKey: "idem-attempt-1",
+        canonicalHash: "hash-a",
+      });
+      expect(first.kind).toBe("claimed");
+      if (first.kind !== "claimed") throw new Error("claim did not win");
+      expect(first.attempt.status).toBe("queued");
+
+      const replay = await claimSendAttempt(env, {
+        mailboxId: "mb-1",
+        idempotencyKey: "idem-attempt-1",
+        canonicalHash: "hash-a",
+      });
+      expect(replay.kind).toBe("replay");
+      expect(replay.attempt.id).toBe(first.attempt.id);
+
+      const mismatch = await claimSendAttempt(env, {
+        mailboxId: "mb-1",
+        idempotencyKey: "idem-attempt-1",
+        canonicalHash: "hash-b",
+      });
+      expect(mismatch).toMatchObject({
+        kind: "mismatch",
+        attempt: { id: first.attempt.id },
+      });
+    });
+
+    it("allows only the declared queued→pending→sent transition and retains provider data for replay", async () => {
+      const claimed = await claimSendAttempt(env, {
+        mailboxId: "mb-1",
+        idempotencyKey: "idem-attempt-2",
+        canonicalHash: "hash-c",
+      });
+      if (claimed.kind !== "claimed") throw new Error("claim did not win");
+
+      await transitionSendAttempt(env, {
+        id: claimed.attempt.id,
+        from: "queued",
+        to: "pending",
+        providerId: "provider-pending",
+      });
+      const pending = await getSendAttempt(env, claimed.attempt.id);
+      expect(pending).toMatchObject({
+        status: "pending",
+        provider_id: "provider-pending",
+      });
+      await transitionSendAttempt(env, {
+        id: claimed.attempt.id,
+        from: "pending",
+        to: "sent",
+        providerId: "provider-2",
+        messageId: "message-2",
+      });
+
+      const stored = await getSendAttempt(env, claimed.attempt.id);
+      expect(stored).toMatchObject({
+        status: "sent",
+        provider_id: "provider-2",
+        message_id: "message-2",
+      });
+      const replay = await claimSendAttempt(env, {
+        mailboxId: "mb-1",
+        idempotencyKey: "idem-attempt-2",
+        canonicalHash: "hash-c",
+      });
+      expect(replay.kind).toBe("replay");
+      expect(replay.attempt.status).toBe("sent");
+      await expect(
+        transitionSendAttempt(env, {
+          id: claimed.attempt.id,
+          from: "sent",
+          to: "pending",
+        }),
+      ).rejects.toThrow(/invalid send attempt transition/i);
+    });
+
+    it("has one atomic winner for concurrent same-key claims", async () => {
+      const results = await Promise.all([
+        claimSendAttempt(env, {
+          mailboxId: "mb-1",
+          idempotencyKey: "idem-race",
+          canonicalHash: "hash-race",
+        }),
+        claimSendAttempt(env, {
+          mailboxId: "mb-1",
+          idempotencyKey: "idem-race",
+          canonicalHash: "hash-race",
+        }),
+      ]);
+
+      expect(results.filter((result) => result.kind === "claimed")).toHaveLength(1);
+      expect(results.filter((result) => result.kind === "replay")).toHaveLength(1);
+      expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM send_attempts").first<{ count: number }>()).toEqual({ count: 1 });
     });
   });
 
