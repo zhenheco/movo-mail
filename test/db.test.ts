@@ -47,6 +47,7 @@ import {
   getVisibleThreadsForUser,
   getThreadsForOwner,
   searchMessagesForOwner,
+  getSentItems,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
@@ -479,6 +480,102 @@ describe("db (real SQL via node:sqlite)", () => {
 
       expect(ownerThreads.map((t) => t.subject)).toEqual(["Kee personal"]);
       expect(otherThreads).toHaveLength(0);
+    });
+  });
+
+  describe("getSentItems", () => {
+    it("returns visible outbound copies newest first with send status", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+
+      const olderId = await insertOutboundMessage(env, {
+        id: "out-older",
+        mailboxId: "mb-1",
+        messageId: "<older@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["older@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Older sent",
+        text: "Older body",
+        html: null,
+        snippet: "Older body",
+        hasAttachments: false,
+        date: 1_700_000_000_000,
+      });
+      const newerId = await insertOutboundMessage(env, {
+        id: "out-newer",
+        mailboxId: "mb-1",
+        messageId: "<newer@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["newer@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Newer sent",
+        text: "Newer body",
+        html: null,
+        snippet: "Newer body",
+        hasAttachments: false,
+        date: 1_700_000_100_000,
+      });
+      await insertSendLog(env, {
+        messageId: olderId,
+        mailboxId: "mb-1",
+        idempotencyKey: "sent-older",
+        providerId: "provider-older",
+        status: "sent",
+        toAddresses: ["older@example.com"],
+        subject: "Older sent",
+        error: null,
+      });
+      await insertSendLog(env, {
+        messageId: newerId,
+        mailboxId: "mb-1",
+        idempotencyKey: "sent-newer",
+        providerId: "provider-newer",
+        status: "sent",
+        toAddresses: ["newer@example.com"],
+        subject: "Newer sent",
+        error: null,
+      });
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toEqual([
+        {
+          kind: "sent",
+          id: newerId,
+          mailboxId: "mb-1",
+          subject: "Newer sent",
+          toAddresses: ["newer@example.com"],
+          snippet: "Newer body",
+          date: 1_700_000_100_000,
+          status: "sent",
+          error: null,
+        },
+        {
+          kind: "sent",
+          id: olderId,
+          mailboxId: "mb-1",
+          subject: "Older sent",
+          toAddresses: ["older@example.com"],
+          snippet: "Older body",
+          date: 1_700_000_000_000,
+          status: "sent",
+          error: null,
+        },
+      ]);
     });
   });
 

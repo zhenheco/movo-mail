@@ -200,6 +200,21 @@ export interface SendLogRow {
   updated_at: EpochMs;
 }
 
+/** A successful outbound copy or a failed send without a message row. */
+export interface SentItem {
+  kind: "sent" | "failed";
+  /** Sent items use messages.id; failed items use send_log.id. */
+  id: string;
+  mailboxId: string;
+  subject: string | null;
+  toAddresses: string[];
+  snippet: string | null;
+  date: EpochMs;
+  status: string;
+  /** Only failed items carry a relay/persistence error. */
+  error: string | null;
+}
+
 export interface AuditRow {
   id: string;
   user_id: string | null;
