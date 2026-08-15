@@ -16,6 +16,7 @@ import {
   fetchMailboxes,
   fetchMe,
   fetchThreads,
+  fetchSent,
   friendlyStatusMessage,
   searchMessages,
   sendMessage,
@@ -271,6 +272,38 @@ describe("api client fetch", () => {
     const threads = await fetchThreads("mb-1");
     expect(threads).toHaveLength(1);
     expect(threads[0]?.id).toBe("t1");
+  });
+
+  it("fetchSent maps the response and translates the all-mailbox sentinel", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              kind: "failed",
+              id: "log-1",
+              mailboxId: "mb-1",
+              subject: "Failed",
+              toAddresses: ["blocked@example.com"],
+              snippet: null,
+              date: 1,
+              status: "failed",
+              error: "relay unavailable",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const items = await fetchSent("__all__");
+
+    expect(items[0]?.kind).toBe("failed");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sent?mailbox=all",
+      expect.anything(),
+    );
   });
 
   it("throws ApiError with server message on non-2xx", async () => {

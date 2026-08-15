@@ -12,10 +12,12 @@ import type {
   AiDraftResult,
   Message,
   MessageWithAttachments,
+  SentItem,
   SendRequest,
   SendResult,
   Thread,
 } from "./types";
+import { ALL_MAILBOXES } from "./mailbox";
 
 /** An API failure with a human-readable, render-safe message. */
 export class ApiError extends Error {
@@ -208,6 +210,15 @@ export async function fetchThreads(mailboxId: string): Promise<Thread[]> {
 export async function fetchAllThreads(): Promise<Thread[]> {
   const data = await request<{ threads: Thread[] }>(`/threads/all`);
   return data.threads;
+}
+
+/** GET /api/sent?mailbox=<id|all> */
+export async function fetchSent(mailboxId: string): Promise<SentItem[]> {
+  const apiMailbox = mailboxId === ALL_MAILBOXES ? "all" : mailboxId;
+  const data = await request<{ items: SentItem[] }>(
+    `/sent${buildQuery({ mailbox: apiMailbox })}`,
+  );
+  return data.items;
 }
 
 /** GET /api/message/:id (html_body is sanitized client-side before render). */
