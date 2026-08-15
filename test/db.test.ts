@@ -47,6 +47,8 @@ import {
   getVisibleThreadsForUser,
   getThreadsForOwner,
   searchMessagesForOwner,
+  getSentItems,
+  getSentItemsForUser,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
@@ -127,6 +129,7 @@ function migrationSql(): string {
     "0002_user_role.sql",
     "0003_mailboxes_address_unique.sql",
     "0004_shared_mailboxes.sql",
+    "0005_send_log_mailbox.sql",
   ]
     .map((name) => readFileSync(join(here, "..", "migrations", name), "utf8"))
     .join("\n");
@@ -478,6 +481,366 @@ describe("db (real SQL via node:sqlite)", () => {
 
       expect(ownerThreads.map((t) => t.subject)).toEqual(["Kee personal"]);
       expect(otherThreads).toHaveLength(0);
+    });
+  });
+
+  describe("getSentItems", () => {
+    it("returns visible outbound copies newest first with send status", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+
+      const olderId = await insertOutboundMessage(env, {
+        id: "out-older",
+        mailboxId: "mb-1",
+        messageId: "<older@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["older@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Older sent",
+        text: "Older body",
+        html: null,
+        snippet: "Older body",
+        hasAttachments: false,
+        date: 1_700_000_000_000,
+      });
+      const newerId = await insertOutboundMessage(env, {
+        id: "out-newer",
+        mailboxId: "mb-1",
+        messageId: "<newer@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["newer@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Newer sent",
+        text: "Newer body",
+        html: null,
+        snippet: "Newer body",
+        hasAttachments: false,
+        date: 1_700_000_100_000,
+      });
+      await insertSendLog(env, {
+        messageId: olderId,
+        mailboxId: "mb-1",
+        idempotencyKey: "sent-older",
+        providerId: "provider-older",
+        status: "sent",
+        toAddresses: ["older@example.com"],
+        subject: "Older sent",
+        error: null,
+      });
+      await insertSendLog(env, {
+        messageId: newerId,
+        mailboxId: "mb-1",
+        idempotencyKey: "sent-newer",
+        providerId: "provider-newer",
+        status: "sent",
+        toAddresses: ["newer@example.com"],
+        subject: "Newer sent",
+        error: null,
+      });
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toEqual([
+        {
+          kind: "sent",
+          id: newerId,
+          mailboxId: "mb-1",
+          subject: "Newer sent",
+          toAddresses: ["newer@example.com"],
+          snippet: "Newer body",
+          date: 1_700_000_100_000,
+          status: "sent",
+          error: null,
+        },
+        {
+          kind: "sent",
+          id: olderId,
+          mailboxId: "mb-1",
+          subject: "Older sent",
+          toAddresses: ["older@example.com"],
+          snippet: "Older body",
+          date: 1_700_000_000_000,
+          status: "sent",
+          error: null,
+        },
+      ]);
+    });
+
+    it("includes a message-less failed send with its error", async () => {
+      await seedMailbox(
+        env,
+        "mb-failed-shared",
+        "shared@movo.com.my",
+        null,
+        "shared",
+      );
+      const id = await insertSendLog(env, {
+        messageId: null,
+        mailboxId: "mb-failed-shared",
+        idempotencyKey: "failed-shared",
+        providerId: null,
+        status: "failed",
+        toAddresses: ["recipient@example.com"],
+        subject: "Could not deliver",
+        error: "relay unavailable",
+      });
+
+      const items = await getSentItems(env, "mb-failed-shared", {
+        userId: null,
+        isAdmin: false,
+      });
+
+      expect(items).toEqual([
+        {
+          kind: "failed",
+          id,
+          mailboxId: "mb-failed-shared",
+          subject: "Could not deliver",
+          toAddresses: ["recipient@example.com"],
+          snippet: null,
+          date: expect.any(Number),
+          status: "failed",
+          error: "relay unavailable",
+        },
+      ]);
+    });
+
+    it("does not duplicate a failed send that already has a message row", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+      const messageId = await insertOutboundMessage(env, {
+        id: "out-backed-failure",
+        mailboxId: "mb-1",
+        messageId: "<backed-failure@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["recipient@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Backed failure",
+        text: "The provider rejected this send.",
+        html: null,
+        snippet: "The provider rejected this send.",
+        hasAttachments: false,
+        date: 1_700_000_200_000,
+      });
+      await insertSendLog(env, {
+        messageId,
+        mailboxId: "mb-1",
+        idempotencyKey: "backed-failure",
+        providerId: "provider-failure",
+        status: "failed",
+        toAddresses: ["recipient@example.com"],
+        subject: "Backed failure",
+        error: "relay rejected",
+      });
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        kind: "sent",
+        id: messageId,
+        status: "failed",
+        error: null,
+      });
+    });
+
+    it("excludes legacy failed logs whose mailbox id is null", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+      await env.DB.prepare(
+        `INSERT INTO send_log
+           (id, message_id, idempotency_key, provider_id, status,
+            to_addresses, subject, error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          "legacy-failed",
+          null,
+          "legacy-failed-key",
+          null,
+          "failed",
+          JSON.stringify(["legacy@example.com"]),
+          "Legacy failure",
+          "old relay error",
+          1_700_000_300_000,
+          1_700_000_300_000,
+        )
+        .run();
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toHaveLength(0);
+    });
+
+    it("matches shared-thread visibility for assigned and unassigned sent mail", async () => {
+      await seedSharedVisibilityFixture(env);
+      const threads = await getThreads(env, "mb-shared");
+      const threadIdBySubject = new Map(
+        threads.map((thread) => [thread.subject, thread.id]),
+      );
+      const messages = [
+        { subject: "Kee sent", threadSubject: "Kee claimed", date: 1_700_000_400_000 },
+        {
+          subject: "Priss sent",
+          threadSubject: "Priss claimed",
+          date: 1_700_000_300_000,
+        },
+        {
+          subject: "Unassigned sent",
+          threadSubject: "Unassigned",
+          date: 1_700_000_200_000,
+        },
+      ];
+      for (const message of messages) {
+        const messageId = await insertOutboundMessage(env, {
+          id: `out-${message.subject.replace(/ /g, "-").toLowerCase()}`,
+          threadId: threadIdBySubject.get(message.threadSubject),
+          mailboxId: "mb-shared",
+          messageId: `<${message.subject.replace(/ /g, "-")}@example.com>`,
+          inReplyTo: null,
+          references: null,
+          fromAddress: "hello@movo.com.my",
+          fromName: "Hello",
+          toAddresses: ["recipient@example.com"],
+          ccAddresses: [],
+          bccAddresses: [],
+          subject: message.subject,
+          text: message.subject,
+          html: null,
+          snippet: message.subject,
+          hasAttachments: false,
+          date: message.date,
+        });
+        await insertSendLog(env, {
+          messageId,
+          mailboxId: "mb-shared",
+          idempotencyKey: `log-${message.subject}`,
+          providerId: `provider-${message.subject}`,
+          status: "sent",
+          toAddresses: ["recipient@example.com"],
+          subject: message.subject,
+          error: null,
+        });
+      }
+
+      const kee = await getSentItems(env, "mb-shared", {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+      const priss = await getSentItems(env, "mb-shared", {
+        userId: "u-priss",
+        isAdmin: false,
+      });
+      const admin = await getSentItems(env, "mb-shared", {
+        userId: "u-admin",
+        isAdmin: true,
+      });
+
+      expect(kee.map((item) => item.subject)).toEqual([
+        "Kee sent",
+        "Unassigned sent",
+      ]);
+      expect(priss.map((item) => item.subject)).toEqual([
+        "Priss sent",
+        "Unassigned sent",
+      ]);
+      expect(admin.map((item) => item.subject)).toEqual([
+        "Kee sent",
+        "Priss sent",
+        "Unassigned sent",
+      ]);
+    });
+
+    it("merges only the viewer's visible sent mailboxes for the all view", async () => {
+      await seedUser(env, "u-alice", "alice@example.com");
+      await seedUser(env, "u-bob", "bob@example.com");
+      await seedMailbox(env, "mb-alice-a", "alice-a@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-alice-b", "alice-b@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-bob", "bob@movo.com.my", "u-bob");
+
+      const sent = [
+        { id: "all-alice-a", mailboxId: "mb-alice-a", date: 1_700_000_500_000 },
+        { id: "all-alice-b", mailboxId: "mb-alice-b", date: 1_700_000_400_000 },
+        { id: "all-bob", mailboxId: "mb-bob", date: 1_700_000_600_000 },
+      ];
+      for (const item of sent) {
+        const messageId = await insertOutboundMessage(env, {
+          id: item.id,
+          mailboxId: item.mailboxId,
+          messageId: `<${item.id}@example.com>`,
+          inReplyTo: null,
+          references: null,
+          fromAddress: `${item.mailboxId}@movo.com.my`,
+          fromName: null,
+          toAddresses: ["recipient@example.com"],
+          ccAddresses: [],
+          bccAddresses: [],
+          subject: item.id,
+          text: item.id,
+          html: null,
+          snippet: item.id,
+          hasAttachments: false,
+          date: item.date,
+        });
+        await insertSendLog(env, {
+          messageId,
+          mailboxId: item.mailboxId,
+          idempotencyKey: `log-${item.id}`,
+          providerId: `provider-${item.id}`,
+          status: "sent",
+          toAddresses: ["recipient@example.com"],
+          subject: item.id,
+          error: null,
+        });
+      }
+      await insertSendLog(env, {
+        messageId: null,
+        mailboxId: "mb-alice-b",
+        idempotencyKey: "all-alice-failed",
+        providerId: null,
+        status: "failed",
+        toAddresses: ["failed@example.com"],
+        subject: "Alice failed",
+        error: "relay failed",
+      });
+
+      const items = await getSentItemsForUser(env, {
+        userId: "u-alice",
+        isAdmin: false,
+      });
+
+      expect(items.map((item) => item.mailboxId)).not.toContain("mb-bob");
+      expect(items.map((item) => item.id)).toEqual(
+        expect.arrayContaining(["all-alice-a", "all-alice-b"]),
+      );
+      expect(items.some((item) => item.kind === "failed")).toBe(true);
     });
   });
 
@@ -1317,6 +1680,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("inserts then reads a send-log row", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-123",
         providerId: "prov-abc",
         status: "queued",
@@ -1334,6 +1698,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("updates status / provider id (COALESCE keeps prior provider)", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-456",
         providerId: "prov-initial",
         status: "queued",
@@ -1350,6 +1715,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("records an error and failed status", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-789",
         providerId: null,
         status: "queued",
@@ -1366,6 +1732,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("rejects a duplicate idempotency key (UNIQUE constraint)", async () => {
       await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "dup-key",
         providerId: null,
         status: "queued",
@@ -1376,6 +1743,7 @@ describe("db (real SQL via node:sqlite)", () => {
       await expect(
         insertSendLog(env, {
           messageId: null,
+          mailboxId: "mb-1",
           idempotencyKey: "dup-key",
           providerId: null,
           status: "queued",

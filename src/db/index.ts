@@ -28,6 +28,7 @@ import type {
   ParsedAttachment,
   ParsedInbound,
   SendStatus,
+  SentItem,
 } from "../types";
 
 /**
@@ -113,6 +114,7 @@ export interface ThreadVisibilityViewer {
 /** Fields used to write a send-log row. */
 export interface SendLogInput {
   messageId: string | null;
+  mailboxId: string;
   idempotencyKey: string;
   providerId: string | null;
   status: SendStatus;
@@ -190,6 +192,117 @@ const MESSAGE_COLS = `id, thread_id, mailbox_id, message_id, in_reply_to,
 const VISIBLE_THREAD_PREDICATE = `((mb.kind = 'personal' AND mb.owner_id = ?)
             OR (mb.kind = 'shared'
                 AND (? = 1 OR t.assignee_id = ? OR t.assignee_id IS NULL)))`;
+
+interface SentItemQueryRow {
+  kind: SentItem["kind"];
+  id: string;
+  mailboxId: string;
+  subject: string | null;
+  toAddresses: string;
+  snippet: string | null;
+  date: number;
+  status: string;
+  error: string | null;
+}
+
+function parseAddresses(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapSentItem(row: SentItemQueryRow): SentItem {
+  return {
+    kind: row.kind,
+    id: row.id,
+    mailboxId: row.mailboxId,
+    subject: row.subject,
+    toAddresses: parseAddresses(row.toAddresses),
+    snippet: row.snippet,
+    date: row.date,
+    status: row.status,
+    error: row.error,
+  };
+}
+
+const SENT_MESSAGE_SELECT = `
+      SELECT 'sent' AS kind,
+             m.id AS id,
+             m.mailbox_id AS mailboxId,
+             m.subject AS subject,
+             m.to_addresses AS toAddresses,
+             m.snippet AS snippet,
+             m.date AS date,
+             COALESCE(sl.status, 'sent') AS status,
+             NULL AS error
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        JOIN mailboxes mb ON mb.id = t.mailbox_id
+        LEFT JOIN send_log sl ON sl.id = (
+          SELECT sl2.id
+            FROM send_log sl2
+           WHERE sl2.message_id = m.id
+           ORDER BY sl2.created_at DESC, sl2.rowid DESC
+           LIMIT 1
+        )`;
+
+const FAILED_LOG_SELECT = `
+      SELECT 'failed' AS kind,
+             sl.id AS id,
+             sl.mailbox_id AS mailboxId,
+             sl.subject AS subject,
+             sl.to_addresses AS toAddresses,
+             NULL AS snippet,
+             sl.created_at AS date,
+             sl.status AS status,
+             sl.error AS error
+        FROM send_log sl
+        JOIN mailboxes mb ON mb.id = sl.mailbox_id
+        -- A failed send has no thread/assignee. The impossible left join gives
+        -- the canonical visibility predicate its unassigned (NULL) branch.
+        LEFT JOIN threads t ON 1 = 0`;
+
+async function querySentItems(
+  env: Env,
+  mailboxId: string | null,
+  viewer: ThreadVisibilityViewer,
+): Promise<SentItem[]> {
+  const sentScope = mailboxId ? "AND t.mailbox_id = ?" : "";
+  const failedScope = mailboxId ? "AND sl.mailbox_id = ?" : "";
+  const sql = `
+    SELECT kind, id, mailboxId, subject, toAddresses, snippet, date, status, error
+      FROM (
+        ${SENT_MESSAGE_SELECT}
+        WHERE m.direction = 'outbound'
+          ${sentScope}
+          AND ${VISIBLE_THREAD_PREDICATE}
+        UNION ALL
+        ${FAILED_LOG_SELECT}
+        WHERE sl.status = 'failed'
+          AND sl.message_id IS NULL
+          AND sl.mailbox_id IS NOT NULL
+          ${failedScope}
+          AND ${VISIBLE_THREAD_PREDICATE}
+      )
+     ORDER BY date DESC, id DESC
+     LIMIT 200`;
+
+  const sentBindings = mailboxId
+    ? [mailboxId, viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId]
+    : [viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId];
+  const failedBindings = mailboxId
+    ? [mailboxId, viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId]
+    : [viewer.userId, viewer.isAdmin ? 1 : 0, viewer.userId];
+  const { results } = await env.DB.prepare(sql)
+    .bind(...sentBindings, ...failedBindings)
+    .all<SentItemQueryRow>();
+  return (results ?? []).map(mapSentItem);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reads
@@ -274,6 +387,23 @@ export async function getVisibleThreadsForUser(
       .all<Thread>();
     return (results ?? []).map((r) => ({ ...r }));
   });
+}
+
+/** List sent and message-less failed sends visible in one mailbox. */
+export async function getSentItems(
+  env: Env,
+  mailboxId: string,
+  viewer: ThreadVisibilityViewer,
+): Promise<SentItem[]> {
+  return guard("getSentItems", () => querySentItems(env, mailboxId, viewer));
+}
+
+/** List sent and message-less failed sends across every visible mailbox. */
+export async function getSentItemsForUser(
+  env: Env,
+  viewer: ThreadVisibilityViewer,
+): Promise<SentItem[]> {
+  return guard("getSentItemsForUser", () => querySentItems(env, null, viewer));
 }
 
 /** True when the resolved DB user can read the given thread. */
@@ -650,7 +780,7 @@ export async function getSendLog(
 ): Promise<SendLogRow | null> {
   return guard("getSendLog", async () => {
     const row = await env.DB.prepare(
-      `SELECT id, message_id, idempotency_key, provider_id, status, to_addresses,
+      `SELECT id, message_id, mailbox_id, idempotency_key, provider_id, status, to_addresses,
               subject, error, created_at, updated_at
          FROM send_log
         WHERE id = ?`,
@@ -985,13 +1115,14 @@ export async function insertSendLog(
     const now = Date.now();
     await env.DB.prepare(
       `INSERT INTO send_log
-         (id, message_id, idempotency_key, provider_id, status, to_addresses,
-          subject, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, message_id, mailbox_id, idempotency_key, provider_id, status,
+          to_addresses, subject, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
         input.messageId,
+        input.mailboxId,
         input.idempotencyKey,
         input.providerId,
         input.status,

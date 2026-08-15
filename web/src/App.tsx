@@ -20,7 +20,13 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import type { Message, MessageWithAttachments, Thread } from "./lib/types";
+import type {
+  MailboxView,
+  Message,
+  MessageWithAttachments,
+  SentItem,
+  Thread,
+} from "./lib/types";
 import {
   ALL_MAILBOXES,
   resolveActiveMailboxId,
@@ -138,6 +144,10 @@ export default function App() {
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [openMessageId, setOpenMessageId] = useState<string | null>(null);
+  const [selectedSentItemId, setSelectedSentItemId] = useState<string | null>(
+    null,
+  );
+  const [mailboxView, setMailboxView] = useState<MailboxView>("inbox");
   const [compose, setCompose] = useState<ComposeDraft | null>(null);
   // Bump to force the inbox to re-fetch after a send.
   const [inboxNonce, setInboxNonce] = useState(0);
@@ -243,11 +253,22 @@ export default function App() {
     const { selectedThreadId, openMessageId } = selectionForThread(thread);
     setSelectedThreadId(selectedThreadId);
     setOpenMessageId(openMessageId);
+    setSelectedSentItemId(null);
   }
 
   function handleSelectSearchHit(message: Message) {
     setSelectedThreadId(message.thread_id);
     setOpenMessageId(message.id);
+    setSelectedSentItemId(null);
+  }
+
+  function handleSelectSentItem(item: SentItem) {
+    if (item.kind !== "sent") {
+      return;
+    }
+    setSelectedThreadId(null);
+    setSelectedSentItemId(item.id);
+    setOpenMessageId(item.id);
   }
 
   function handleReply(message: MessageWithAttachments) {
@@ -267,6 +288,16 @@ export default function App() {
   function handleHome() {
     setSelectedThreadId(null);
     setOpenMessageId(null);
+    setSelectedSentItemId(null);
+    setCompose(null);
+    setMailboxView("inbox");
+  }
+
+  function handleViewChange(view: MailboxView) {
+    setMailboxView(view);
+    setSelectedThreadId(null);
+    setOpenMessageId(null);
+    setSelectedSentItemId(null);
     setCompose(null);
   }
 
@@ -277,18 +308,28 @@ export default function App() {
     }
     storeMailboxId(id);
     setMailboxState({ ...mailboxState, activeId: id });
-    handleHome();
+    setSelectedThreadId(null);
+    setOpenMessageId(null);
+    setSelectedSentItemId(null);
+    setCompose(null);
   }
+
+  const readerMessageId =
+    mailboxView === "sent" ? selectedSentItemId : openMessageId;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       <ThreadList
         // key forces a fresh mount (and refetch) when we want the inbox to reload
-        key={`inbox-${mailboxId}-${inboxNonce}`}
+        key={`mailbox-${mailboxId}-${inboxNonce}`}
         mailboxId={mailboxId}
+        activeView={mailboxView}
+        onViewChange={handleViewChange}
         selectedThreadId={selectedThreadId}
+        selectedSentItemId={selectedSentItemId}
         onSelectThread={handleSelectThread}
         onSelectSearchHit={handleSelectSearchHit}
+        onSelectSentItem={handleSelectSentItem}
         onCompose={handleCompose}
         onHome={handleHome}
         onOpenSettings={isAdmin ? () => setShowSettings(true) : undefined}
@@ -297,7 +338,7 @@ export default function App() {
       />
 
       <main aria-label="Conversation" className="flex flex-1 flex-col overflow-hidden">
-        <ThreadView messageId={openMessageId} onReply={handleReply} />
+        <ThreadView messageId={readerMessageId} onReply={handleReply} />
         {compose ? (
           <Compose
             fromAddress={fromAddress}

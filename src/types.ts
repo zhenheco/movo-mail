@@ -188,6 +188,7 @@ export interface Attachment {
 export interface SendLogRow {
   id: string;
   message_id: string | null;
+  mailbox_id: string | null;
   idempotency_key: string;
   provider_id: string | null;
   status: SendStatus;
@@ -197,6 +198,21 @@ export interface SendLogRow {
   error: string | null;
   created_at: EpochMs;
   updated_at: EpochMs;
+}
+
+/** A successful outbound copy or a failed send without a message row. */
+export interface SentItem {
+  kind: "sent" | "failed";
+  /** Sent items use messages.id; failed items use send_log.id. */
+  id: string;
+  mailboxId: string;
+  subject: string | null;
+  toAddresses: string[];
+  snippet: string | null;
+  date: EpochMs;
+  status: string;
+  /** Only failed items carry a relay/persistence error. */
+  error: string | null;
 }
 
 export interface AuditRow {

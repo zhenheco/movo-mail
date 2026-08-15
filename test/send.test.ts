@@ -696,9 +696,11 @@ describe("POST /send", () => {
       status: string;
       idempotencyKey: string;
       providerId: string | null;
+      mailboxId: string;
     };
     expect(logArg.status).toBe("sent");
     expect(logArg.providerId).toBe("cfes_msg_1");
+    expect(logArg.mailboxId).toBe(MAILBOX.id);
     expect(typeof logArg.idempotencyKey).toBe("string");
     expect(logArg.idempotencyKey.length).toBeGreaterThan(0);
   });
@@ -833,8 +835,12 @@ describe("POST /send", () => {
     // a failed send_log must still be recorded; the message is NOT persisted
     expect(insertSendLog).toHaveBeenCalledTimes(1);
     expect(insertOutboundMessage).not.toHaveBeenCalled();
-    const logArg = insertSendLog.mock.calls[0]?.[1] as { status: string };
+    const logArg = insertSendLog.mock.calls[0]?.[1] as {
+      status: string;
+      mailboxId: string;
+    };
     expect(logArg.status).toBe("failed");
+    expect(logArg.mailboxId).toBe(MAILBOX.id);
   });
 
   it("logs a failed send and returns 502 when the relay errors", async () => {
@@ -850,8 +856,38 @@ describe("POST /send", () => {
     );
     expect(res.status).toBe(502);
     expect(insertSendLog).toHaveBeenCalledTimes(1);
-    const logArg = insertSendLog.mock.calls[0]?.[1] as { status: string };
+    const logArg = insertSendLog.mock.calls[0]?.[1] as {
+      status: string;
+      mailboxId: string;
+    };
     expect(logArg.status).toBe("failed");
+    expect(logArg.mailboxId).toBe(MAILBOX.id);
+  });
+
+  it("records the mailbox when sent-copy persistence fails", async () => {
+    stubRelay(relayOk());
+    insertSendLog.mockRejectedValueOnce(new Error("send log unavailable"));
+
+    const res = await makeApp().fetch(
+      postBody({
+        to: [{ address: "bob@example.com" }],
+        subject: "Persistence failure",
+        text: "hello",
+        mailboxId: MAILBOX.id,
+      }),
+      makeEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertSendLog).toHaveBeenCalledTimes(2);
+    const logArg = insertSendLog.mock.calls[1]?.[1] as {
+      status: string;
+      mailboxId: string;
+      messageId: string | null;
+    };
+    expect(logArg.status).toBe("failed");
+    expect(logArg.mailboxId).toBe(MAILBOX.id);
+    expect(logArg.messageId).toBe("msg-row-1");
   });
 
   it("rejects an empty recipient list with 400 and does not call the relay", async () => {

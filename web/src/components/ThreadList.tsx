@@ -4,12 +4,13 @@
  * loading / error / empty handling.
  */
 
-import { useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import type { Message, Thread } from "../lib/types";
+import { useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
+import type { MailboxView, Message, SentItem, Thread } from "../lib/types";
 import {
   fetchThreads,
   fetchAllThreads,
+  fetchSent,
   searchMessages,
   type MailboxSummary,
 } from "../lib/api";
@@ -25,10 +26,15 @@ import { Badge } from "./ui/badge";
 
 export interface ThreadListProps {
   mailboxId: string;
+  activeView: MailboxView;
+  onViewChange: (view: MailboxView) => void;
   selectedThreadId: string | null;
+  selectedSentItemId: string | null;
   onSelectThread: (thread: Thread) => void;
   /** Selecting a search hit jumps straight to that message's thread. */
   onSelectSearchHit: (message: Message) => void;
+  /** Selecting a stored outbound copy opens its message in ThreadView. */
+  onSelectSentItem: (item: SentItem) => void;
   onCompose: () => void;
   /** Click the "Movo Mail" wordmark to return to a clean inbox. */
   onHome: () => void;
@@ -42,9 +48,13 @@ export interface ThreadListProps {
 
 export function ThreadList({
   mailboxId,
+  activeView,
+  onViewChange,
   selectedThreadId,
+  selectedSentItemId,
   onSelectThread,
   onSelectSearchHit,
+  onSelectSentItem,
   onCompose,
   onHome,
   onOpenSettings,
@@ -78,17 +88,23 @@ export function ThreadList({
 
   const threadsState = useAsync<Thread[]>(
     () => (isAll ? fetchAllThreads() : fetchThreads(mailboxId)),
-    [mailboxId],
-    { enabled: activeQuery.trim() === "" },
+    [mailboxId, activeView],
+    { enabled: activeView === "inbox" && activeQuery.trim() === "" },
   );
 
   const searchState = useAsync<Message[]>(
     () => searchMessages(activeQuery, isAll ? undefined : mailboxId),
-    [mailboxId, activeQuery],
-    { enabled: activeQuery.trim() !== "" },
+    [mailboxId, activeQuery, activeView],
+    { enabled: activeView === "inbox" && activeQuery.trim() !== "" },
   );
 
-  const isSearching = activeQuery.trim() !== "";
+  const sentState = useAsync<SentItem[]>(
+    () => fetchSent(mailboxId),
+    [mailboxId, activeView],
+    { enabled: activeView === "sent" },
+  );
+
+  const isSearching = activeView === "inbox" && activeQuery.trim() !== "";
 
   function submitSearch(e: FormEvent) {
     e.preventDefault();
@@ -98,6 +114,13 @@ export function ThreadList({
   function clearSearch() {
     setSearchTerm("");
     setActiveQuery("");
+  }
+
+  function handleViewChange(view: MailboxView) {
+    if (view !== activeView) {
+      clearSearch();
+    }
+    onViewChange(view);
   }
 
   return (
@@ -139,6 +162,8 @@ export function ThreadList({
         />
       ) : null}
 
+      <MailboxViewTabs activeView={activeView} onViewChange={handleViewChange} />
+
       {/* Gmail-style raised "Compose" pill above the inbox. */}
       <div className="px-3 pb-3">
         <button
@@ -171,7 +196,15 @@ export function ThreadList({
       </form>
 
       <div className="flex-1 overflow-y-auto">
-        {isSearching ? (
+        {activeView === "sent" ? (
+          <SentRows
+            state={sentState}
+            selectedSentItemId={selectedSentItemId}
+            onSelectSentItem={onSelectSentItem}
+            showSource={isAll}
+            mailboxById={mailboxById}
+          />
+        ) : isSearching ? (
           <SearchResults
             state={searchState}
             onSelectSearchHit={onSelectSearchHit}
@@ -187,6 +220,195 @@ export function ThreadList({
         )}
       </div>
     </aside>
+  );
+}
+
+const MAILBOX_VIEW_ORDER: MailboxView[] = ["inbox", "sent"];
+
+function MailboxViewTabs({
+  activeView,
+  onViewChange,
+}: {
+  activeView: MailboxView;
+  onViewChange: (view: MailboxView) => void;
+}) {
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const labels: Record<MailboxView, string> = {
+    inbox: "收件匣",
+    sent: "寄件備份",
+  };
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % MAILBOX_VIEW_ORDER.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex =
+        (index - 1 + MAILBOX_VIEW_ORDER.length) % MAILBOX_VIEW_ORDER.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = MAILBOX_VIEW_ORDER.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const nextView = MAILBOX_VIEW_ORDER[nextIndex]!;
+    onViewChange(nextView);
+    tabRefs.current[nextIndex]?.focus();
+  }
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Mailbox sections"
+      className="flex border-b border-border px-3"
+    >
+      {MAILBOX_VIEW_ORDER.map((view, index) => {
+        const selected = view === activeView;
+        return (
+          <button
+            key={view}
+            ref={(element) => {
+              tabRefs.current[index] = element;
+            }}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onViewChange(view)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
+            className={cn(
+              "flex-1 border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              selected
+                ? "border-primary font-medium text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {labels[view]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SentRows({
+  state,
+  selectedSentItemId,
+  onSelectSentItem,
+  showSource,
+  mailboxById,
+}: {
+  state: ReturnType<typeof useAsync<SentItem[]>>;
+  selectedSentItemId: string | null;
+  onSelectSentItem: (item: SentItem) => void;
+  showSource: boolean;
+  mailboxById: Record<string, MailboxSummary>;
+}) {
+  if (state.loading) {
+    return <LoadingState label="Loading sent mail…" />;
+  }
+  if (state.error) {
+    return <ErrorState message={state.error} onRetry={state.reload} />;
+  }
+  const items = state.data ?? [];
+  if (items.length === 0) {
+    return <EmptyState message="No sent mail yet." />;
+  }
+  return (
+    <ul className="divide-y divide-border">
+      {items.map((item) => (
+        <li key={`${item.kind}-${item.id}`}>
+          <SentRow
+            item={item}
+            selected={item.id === selectedSentItemId}
+            onSelect={() => onSelectSentItem(item)}
+            sourceAddress={
+              showSource
+                ? mailboxById[item.mailboxId]?.address ?? null
+                : null
+            }
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SentRow({
+  item,
+  selected,
+  onSelect,
+  sourceAddress,
+}: {
+  item: SentItem;
+  selected: boolean;
+  onSelect: () => void;
+  sourceAddress: string | null;
+}) {
+  const subject = item.subject?.trim() || "(no subject)";
+  const recipients = item.toAddresses.join(", ") || "No recipients";
+  if (item.kind === "failed") {
+    return (
+      <div
+        aria-label="Failed send"
+        className="flex flex-col gap-1 border-l-2 border-red-500 bg-red-50/50 px-4 py-3 text-left dark:bg-red-950/20"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-sm font-medium">{subject}</span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {formatDate(item.date)}
+          </span>
+        </div>
+        <span className="truncate text-xs text-muted-foreground">
+          To: {recipients}
+        </span>
+        {sourceAddress ? (
+          <span className="w-fit max-w-full truncate rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            {sourceAddress}
+          </span>
+        ) : null}
+        <span className="w-fit rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-800">
+          寄件失敗
+        </span>
+        <span className="text-xs text-red-700 dark:text-red-300">
+          {item.error || "The send failed."}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={selected ? "true" : undefined}
+      aria-label={`Sent message: ${subject}`}
+      className={cn(
+        "flex w-full flex-col gap-1 px-4 py-3 text-left transition-colors hover:bg-muted",
+        selected && "bg-muted",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-sm">{subject}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {formatDate(item.date)}
+        </span>
+      </div>
+      {sourceAddress ? (
+        <span className="w-fit max-w-full truncate rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {sourceAddress}
+        </span>
+      ) : null}
+      <span className="truncate text-xs text-muted-foreground">
+        To: {recipients}
+      </span>
+      <span className="truncate text-xs text-muted-foreground">
+        {item.snippet?.trim() || "No preview available."}
+      </span>
+    </button>
   );
 }
 

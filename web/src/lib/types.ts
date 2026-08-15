@@ -40,6 +40,23 @@ export interface Thread {
   updated_at: EpochMs;
 }
 
+/** The controlled left-pane tab. */
+export type MailboxView = "inbox" | "sent";
+
+/** A stored outbound message or a message-less failed send. */
+export interface SentItem {
+  kind: "sent" | "failed";
+  /** Sent items use messages.id; failed items use send_log.id. */
+  id: string;
+  mailboxId: string;
+  subject: string | null;
+  toAddresses: string[];
+  snippet: string | null;
+  date: EpochMs;
+  status: string;
+  error: string | null;
+}
+
 /** A single message row, as returned by GET /api/message/:id and /api/search. */
 export interface Message {
   id: string;
