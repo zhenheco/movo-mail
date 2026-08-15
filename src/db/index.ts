@@ -262,16 +262,10 @@ const FAILED_LOG_SELECT = `
              sl.status AS status,
              sl.error AS error
         FROM send_log sl
-        JOIN mailboxes mb ON mb.id = sl.mailbox_id`;
-
-function sharedOrPersonalMailboxPredicate(): string {
-  // A message-less failed send has no thread/assignee to inspect. Treat it as
-  // an unassigned item in a shared mailbox, which is the NULL branch of the
-  // canonical shared-thread visibility predicate; personal mailboxes remain
-  // owner-only. The route still gates access to the requested mailbox.
-  return `((mb.kind = 'personal' AND mb.owner_id = ?)
-            OR (mb.kind = 'shared' AND (? = 1 OR ? IS NOT NULL)))`;
-}
+        JOIN mailboxes mb ON mb.id = sl.mailbox_id
+        -- A failed send has no thread/assignee. The impossible left join gives
+        -- the canonical visibility predicate its unassigned (NULL) branch.
+        LEFT JOIN threads t ON 1 = 0`;
 
 async function querySentItems(
   env: Env,
@@ -292,7 +286,7 @@ async function querySentItems(
         WHERE sl.status = 'failed'
           AND sl.message_id IS NULL
           ${failedScope}
-          AND ${mailboxId ? sharedOrPersonalMailboxPredicate() : sharedOrPersonalMailboxPredicate()}
+          AND ${VISIBLE_THREAD_PREDICATE}
       )
      ORDER BY date DESC, id DESC
      LIMIT 200`;

@@ -577,6 +577,45 @@ describe("db (real SQL via node:sqlite)", () => {
         },
       ]);
     });
+
+    it("includes a message-less failed send with its error", async () => {
+      await seedMailbox(
+        env,
+        "mb-failed-shared",
+        "shared@movo.com.my",
+        null,
+        "shared",
+      );
+      const id = await insertSendLog(env, {
+        messageId: null,
+        mailboxId: "mb-failed-shared",
+        idempotencyKey: "failed-shared",
+        providerId: null,
+        status: "failed",
+        toAddresses: ["recipient@example.com"],
+        subject: "Could not deliver",
+        error: "relay unavailable",
+      });
+
+      const items = await getSentItems(env, "mb-failed-shared", {
+        userId: null,
+        isAdmin: false,
+      });
+
+      expect(items).toEqual([
+        {
+          kind: "failed",
+          id,
+          mailboxId: "mb-failed-shared",
+          subject: "Could not deliver",
+          toAddresses: ["recipient@example.com"],
+          snippet: null,
+          date: expect.any(Number),
+          status: "failed",
+          error: "relay unavailable",
+        },
+      ]);
+    });
   });
 
   describe("getVisibleThreadsForUser", () => {
