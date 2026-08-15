@@ -48,6 +48,7 @@ import {
   getThreadsForOwner,
   searchMessagesForOwner,
   getSentItems,
+  getSentItemsForUser,
   type OutboundMessageInput,
 } from "../src/db";
 import type { Env, ParsedInbound, EmailAddress } from "../src/types";
@@ -775,6 +776,71 @@ describe("db (real SQL via node:sqlite)", () => {
         "Priss sent",
         "Unassigned sent",
       ]);
+    });
+
+    it("merges only the viewer's visible sent mailboxes for the all view", async () => {
+      await seedUser(env, "u-alice", "alice@example.com");
+      await seedUser(env, "u-bob", "bob@example.com");
+      await seedMailbox(env, "mb-alice-a", "alice-a@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-alice-b", "alice-b@movo.com.my", "u-alice");
+      await seedMailbox(env, "mb-bob", "bob@movo.com.my", "u-bob");
+
+      const sent = [
+        { id: "all-alice-a", mailboxId: "mb-alice-a", date: 1_700_000_500_000 },
+        { id: "all-alice-b", mailboxId: "mb-alice-b", date: 1_700_000_400_000 },
+        { id: "all-bob", mailboxId: "mb-bob", date: 1_700_000_600_000 },
+      ];
+      for (const item of sent) {
+        const messageId = await insertOutboundMessage(env, {
+          id: item.id,
+          mailboxId: item.mailboxId,
+          messageId: `<${item.id}@example.com>`,
+          inReplyTo: null,
+          references: null,
+          fromAddress: `${item.mailboxId}@movo.com.my`,
+          fromName: null,
+          toAddresses: ["recipient@example.com"],
+          ccAddresses: [],
+          bccAddresses: [],
+          subject: item.id,
+          text: item.id,
+          html: null,
+          snippet: item.id,
+          hasAttachments: false,
+          date: item.date,
+        });
+        await insertSendLog(env, {
+          messageId,
+          mailboxId: item.mailboxId,
+          idempotencyKey: `log-${item.id}`,
+          providerId: `provider-${item.id}`,
+          status: "sent",
+          toAddresses: ["recipient@example.com"],
+          subject: item.id,
+          error: null,
+        });
+      }
+      await insertSendLog(env, {
+        messageId: null,
+        mailboxId: "mb-alice-b",
+        idempotencyKey: "all-alice-failed",
+        providerId: null,
+        status: "failed",
+        toAddresses: ["failed@example.com"],
+        subject: "Alice failed",
+        error: "relay failed",
+      });
+
+      const items = await getSentItemsForUser(env, {
+        userId: "u-alice",
+        isAdmin: false,
+      });
+
+      expect(items.map((item) => item.mailboxId)).not.toContain("mb-bob");
+      expect(items.map((item) => item.id)).toEqual(
+        expect.arrayContaining(["all-alice-a", "all-alice-b"]),
+      );
+      expect(items.some((item) => item.kind === "failed")).toBe(true);
     });
   });
 
