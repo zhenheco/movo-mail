@@ -24,6 +24,7 @@ import { mailboxRoutes } from "./mailboxes";
 import { threadRoutes } from "./threads";
 import { messageRoutes } from "./message";
 import { searchRoutes } from "./search";
+import { sentRoutes } from "./sent";
 import { sendRoutes } from "./send";
 import { aiRoutes } from "./ai";
 import { meRoutes } from "./me";
@@ -44,6 +45,7 @@ export function readRoutes(): Hono<AccessEnv> {
   app.route("/", threadRoutes());
   app.route("/", messageRoutes());
   app.route("/", searchRoutes());
+  app.route("/", sentRoutes());
   return app;
 }
 
