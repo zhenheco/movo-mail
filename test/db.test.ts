@@ -664,6 +664,39 @@ describe("db (real SQL via node:sqlite)", () => {
         error: null,
       });
     });
+
+    it("excludes legacy failed logs whose mailbox id is null", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+      await env.DB.prepare(
+        `INSERT INTO send_log
+           (id, message_id, idempotency_key, provider_id, status,
+            to_addresses, subject, error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          "legacy-failed",
+          null,
+          "legacy-failed-key",
+          null,
+          "failed",
+          JSON.stringify(["legacy@example.com"]),
+          "Legacy failure",
+          "old relay error",
+          1_700_000_300_000,
+          1_700_000_300_000,
+        )
+        .run();
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toHaveLength(0);
+    });
   });
 
   describe("getVisibleThreadsForUser", () => {

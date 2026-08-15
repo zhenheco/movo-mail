@@ -285,6 +285,7 @@ async function querySentItems(
         ${FAILED_LOG_SELECT}
         WHERE sl.status = 'failed'
           AND sl.message_id IS NULL
+          AND sl.mailbox_id IS NOT NULL
           ${failedScope}
           AND ${VISIBLE_THREAD_PREDICATE}
       )
