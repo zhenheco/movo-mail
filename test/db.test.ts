@@ -697,6 +697,85 @@ describe("db (real SQL via node:sqlite)", () => {
 
       expect(items).toHaveLength(0);
     });
+
+    it("matches shared-thread visibility for assigned and unassigned sent mail", async () => {
+      await seedSharedVisibilityFixture(env);
+      const threads = await getThreads(env, "mb-shared");
+      const threadIdBySubject = new Map(
+        threads.map((thread) => [thread.subject, thread.id]),
+      );
+      const messages = [
+        { subject: "Kee sent", threadSubject: "Kee claimed", date: 1_700_000_400_000 },
+        {
+          subject: "Priss sent",
+          threadSubject: "Priss claimed",
+          date: 1_700_000_300_000,
+        },
+        {
+          subject: "Unassigned sent",
+          threadSubject: "Unassigned",
+          date: 1_700_000_200_000,
+        },
+      ];
+      for (const message of messages) {
+        const messageId = await insertOutboundMessage(env, {
+          id: `out-${message.subject.replace(/ /g, "-").toLowerCase()}`,
+          threadId: threadIdBySubject.get(message.threadSubject),
+          mailboxId: "mb-shared",
+          messageId: `<${message.subject.replace(/ /g, "-")}@example.com>`,
+          inReplyTo: null,
+          references: null,
+          fromAddress: "hello@movo.com.my",
+          fromName: "Hello",
+          toAddresses: ["recipient@example.com"],
+          ccAddresses: [],
+          bccAddresses: [],
+          subject: message.subject,
+          text: message.subject,
+          html: null,
+          snippet: message.subject,
+          hasAttachments: false,
+          date: message.date,
+        });
+        await insertSendLog(env, {
+          messageId,
+          mailboxId: "mb-shared",
+          idempotencyKey: `log-${message.subject}`,
+          providerId: `provider-${message.subject}`,
+          status: "sent",
+          toAddresses: ["recipient@example.com"],
+          subject: message.subject,
+          error: null,
+        });
+      }
+
+      const kee = await getSentItems(env, "mb-shared", {
+        userId: "u-kee",
+        isAdmin: false,
+      });
+      const priss = await getSentItems(env, "mb-shared", {
+        userId: "u-priss",
+        isAdmin: false,
+      });
+      const admin = await getSentItems(env, "mb-shared", {
+        userId: "u-admin",
+        isAdmin: true,
+      });
+
+      expect(kee.map((item) => item.subject)).toEqual([
+        "Kee sent",
+        "Unassigned sent",
+      ]);
+      expect(priss.map((item) => item.subject)).toEqual([
+        "Priss sent",
+        "Unassigned sent",
+      ]);
+      expect(admin.map((item) => item.subject)).toEqual([
+        "Kee sent",
+        "Priss sent",
+        "Unassigned sent",
+      ]);
+    });
   });
 
   describe("getVisibleThreadsForUser", () => {
