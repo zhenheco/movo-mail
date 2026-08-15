@@ -616,6 +616,54 @@ describe("db (real SQL via node:sqlite)", () => {
         },
       ]);
     });
+
+    it("does not duplicate a failed send that already has a message row", async () => {
+      await seedUser(env, "u-owner", "owner@example.com");
+      await env.DB.prepare(`UPDATE mailboxes SET owner_id = ? WHERE id = ?`)
+        .bind("u-owner", "mb-1")
+        .run();
+      const messageId = await insertOutboundMessage(env, {
+        id: "out-backed-failure",
+        mailboxId: "mb-1",
+        messageId: "<backed-failure@example.com>",
+        inReplyTo: null,
+        references: null,
+        fromAddress: "support@movo.com.my",
+        fromName: "Support",
+        toAddresses: ["recipient@example.com"],
+        ccAddresses: [],
+        bccAddresses: [],
+        subject: "Backed failure",
+        text: "The provider rejected this send.",
+        html: null,
+        snippet: "The provider rejected this send.",
+        hasAttachments: false,
+        date: 1_700_000_200_000,
+      });
+      await insertSendLog(env, {
+        messageId,
+        mailboxId: "mb-1",
+        idempotencyKey: "backed-failure",
+        providerId: "provider-failure",
+        status: "failed",
+        toAddresses: ["recipient@example.com"],
+        subject: "Backed failure",
+        error: "relay rejected",
+      });
+
+      const items = await getSentItems(env, "mb-1", {
+        userId: "u-owner",
+        isAdmin: false,
+      });
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        kind: "sent",
+        id: messageId,
+        status: "failed",
+        error: null,
+      });
+    });
   });
 
   describe("getVisibleThreadsForUser", () => {
