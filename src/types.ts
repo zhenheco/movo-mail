@@ -188,6 +188,7 @@ export interface Attachment {
 export interface SendLogRow {
   id: string;
   message_id: string | null;
+  mailbox_id: string | null;
   idempotency_key: string;
   provider_id: string | null;
   status: SendStatus;

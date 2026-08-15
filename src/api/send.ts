@@ -528,6 +528,7 @@ export function sendRoutes(): Hono<AccessEnv> {
         relayStatus != null && SUPPRESSED_STATUSES.has(relayStatus);
       await safeFailLog(c.env, {
         idempotencyKey,
+        mailboxId: mailbox.id,
         toAddresses,
         subject: validated.subject,
         error: err instanceof Error ? err.message : "send failed",
@@ -556,6 +557,7 @@ export function sendRoutes(): Hono<AccessEnv> {
     if (SUPPRESSED_STATUSES.has(result.status)) {
       await safeFailLog(c.env, {
         idempotencyKey,
+        mailboxId: mailbox.id,
         toAddresses,
         subject: validated.subject,
         error: `relay status: ${result.status}`,
@@ -616,6 +618,7 @@ export function sendRoutes(): Hono<AccessEnv> {
 
       await insertSendLog(c.env, {
         messageId: messageRowId,
+        mailboxId: mailbox.id,
         idempotencyKey,
         providerId: result.id,
         status: "sent",
@@ -632,6 +635,7 @@ export function sendRoutes(): Hono<AccessEnv> {
       // the discrepancy is visible, but still report success to the caller.
       await safeFailLog(c.env, {
         idempotencyKey,
+        mailboxId: mailbox.id,
         toAddresses,
         subject: validated.subject,
         error:
@@ -671,6 +675,7 @@ async function safeFailLog(
   env: Env,
   args: {
     idempotencyKey: string;
+    mailboxId: string;
     toAddresses: string[];
     subject: string;
     error: string;
@@ -681,6 +686,7 @@ async function safeFailLog(
   try {
     await insertSendLog(env, {
       messageId: args.messageId ?? null,
+      mailboxId: args.mailboxId,
       idempotencyKey: args.idempotencyKey,
       providerId: args.providerId ?? null,
       status: "failed",

@@ -113,6 +113,7 @@ export interface ThreadVisibilityViewer {
 /** Fields used to write a send-log row. */
 export interface SendLogInput {
   messageId: string | null;
+  mailboxId: string;
   idempotencyKey: string;
   providerId: string | null;
   status: SendStatus;
@@ -650,7 +651,7 @@ export async function getSendLog(
 ): Promise<SendLogRow | null> {
   return guard("getSendLog", async () => {
     const row = await env.DB.prepare(
-      `SELECT id, message_id, idempotency_key, provider_id, status, to_addresses,
+      `SELECT id, message_id, mailbox_id, idempotency_key, provider_id, status, to_addresses,
               subject, error, created_at, updated_at
          FROM send_log
         WHERE id = ?`,
@@ -985,13 +986,14 @@ export async function insertSendLog(
     const now = Date.now();
     await env.DB.prepare(
       `INSERT INTO send_log
-         (id, message_id, idempotency_key, provider_id, status, to_addresses,
-          subject, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, message_id, mailbox_id, idempotency_key, provider_id, status,
+          to_addresses, subject, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
         input.messageId,
+        input.mailboxId,
         input.idempotencyKey,
         input.providerId,
         input.status,

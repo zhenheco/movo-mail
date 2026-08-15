@@ -127,6 +127,7 @@ function migrationSql(): string {
     "0002_user_role.sql",
     "0003_mailboxes_address_unique.sql",
     "0004_shared_mailboxes.sql",
+    "0005_send_log_mailbox.sql",
   ]
     .map((name) => readFileSync(join(here, "..", "migrations", name), "utf8"))
     .join("\n");
@@ -1317,6 +1318,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("inserts then reads a send-log row", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-123",
         providerId: "prov-abc",
         status: "queued",
@@ -1334,6 +1336,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("updates status / provider id (COALESCE keeps prior provider)", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-456",
         providerId: "prov-initial",
         status: "queued",
@@ -1350,6 +1353,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("records an error and failed status", async () => {
       const id = await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "idem-789",
         providerId: null,
         status: "queued",
@@ -1366,6 +1370,7 @@ describe("db (real SQL via node:sqlite)", () => {
     it("rejects a duplicate idempotency key (UNIQUE constraint)", async () => {
       await insertSendLog(env, {
         messageId: null,
+        mailboxId: "mb-1",
         idempotencyKey: "dup-key",
         providerId: null,
         status: "queued",
@@ -1376,6 +1381,7 @@ describe("db (real SQL via node:sqlite)", () => {
       await expect(
         insertSendLog(env, {
           messageId: null,
+          mailboxId: "mb-1",
           idempotencyKey: "dup-key",
           providerId: null,
           status: "queued",
