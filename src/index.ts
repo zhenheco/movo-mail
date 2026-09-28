@@ -52,6 +52,20 @@ const sentryFetchWorker = Sentry.withSentry<Env>((env) => buildSentryOptions(env
 });
 const sentryFetch = sentryFetchWorker.fetch as unknown as typeof fetch;
 
+const M365_ROUTE: Readonly<Record<string, string>> = {
+  "hello@movo.com.my": "hello@movocommy.onmicrosoft.com",
+  "customerservice@movo.com.my": "customerservice@movocommy.onmicrosoft.com",
+  "finance@movo.com.my": "finance@movocommy.onmicrosoft.com",
+  "refund@movo.com.my": "finance@movocommy.onmicrosoft.com",
+  "merchantpayment@movo.com.my": "finance@movocommy.onmicrosoft.com",
+  "movopartnerpayment@movo.com.my": "finance@movocommy.onmicrosoft.com",
+};
+
+const CF_COPY_RECIPIENTS = [
+  "priss@movo.com.my",
+  "suzanne@movo.com.my",
+] as const;
+
 const worker = {
   fetch(
     request: Request,
@@ -91,8 +105,24 @@ const worker = {
     const managed = await isManagedAddress(env, message.to).catch(() => false);
 
     if (managed) {
-      // Store path — unchanged. handleInbound never throws (logs + swallows).
-      ctx.waitUntil(handleInbound(message, env));
+      const m365Destination = M365_ROUTE[message.to.trim().toLowerCase()];
+      if (!m365Destination) {
+        ctx.waitUntil(handleInbound(message, env));
+        return;
+      }
+
+      // Archive first so a Microsoft delivery failure never loses the
+      // Cloudflare copy. Priss and Suzanne receive independent CF inbox copies.
+      await handleInbound(message, env, CF_COPY_RECIPIENTS);
+      try {
+        await message.forward(m365Destination);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[email] failed to forward managed mail for ${message.to} ` +
+            `to ${m365Destination}: ${reason}`,
+        );
+      }
       return;
     }
 

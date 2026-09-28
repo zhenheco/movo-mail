@@ -82,6 +82,7 @@ async function archiveToR2(
 export async function handleInbound(
   message: InboundEmailMessage,
   env: Env,
+  copyRecipients: readonly string[] = [],
 ): Promise<void> {
   const recipient = message.to;
   try {
@@ -97,15 +98,30 @@ export async function handleInbound(
 
     const raw = await readRaw(message.raw);
     const parsed = await parseInbound(raw, mailbox.address, Date.now());
+    const recipients = [...new Set([mailbox.address, ...copyRecipients])];
 
-    // Mint ONE id and thread it through both sides: the R2 archive (raw .eml +
-    // attachment bytes) and the D1 index. This keeps the persisted row's
-    // r2_raw_key / attachment r2_key pointing at the exact objects we put,
-    // instead of each side minting its own id and orphaning the bytes.
-    const id = uuidv4();
-    await archiveToR2(env, id, raw, parsed.attachments);
+    for (const address of recipients) {
+      try {
+        const destination = await getMailboxByAddress(env, address);
+        if (!destination) {
+          console.warn(`[inbound] no copy mailbox for recipient: ${address}`);
+          continue;
+        }
 
-    await insertInboundMessage(env, parsed, id);
+        // Each mailbox gets its own D1 row and R2 objects so normal mailbox
+        // deletion and retention rules remain independent.
+        const id = uuidv4();
+        await archiveToR2(env, id, raw, parsed.attachments);
+        await insertInboundMessage(
+          env,
+          { ...parsed, mailboxAddress: destination.address },
+          id,
+        );
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error(`[inbound] failed to copy message to ${address}: ${reason}`);
+      }
+    }
   } catch (err) {
     // Email handlers must not throw; log and swallow so the runtime can ack.
     const reason = err instanceof Error ? err.message : String(err);

@@ -224,6 +224,37 @@ describe("handleInbound", () => {
     expect(puts.some((p) => p.key === `msg/${passedId}.eml`)).toBe(true);
   });
 
+  it("stores independent Cloudflare copies for additional recipients", async () => {
+    const { bucket, puts } = makeR2();
+    const env = makeEnv(bucket);
+    const msg = makeMessage(PLAIN_EML, "support@movo.com.my");
+    vi.mocked(db.getMailboxByAddress).mockImplementation(async (_env, address) => ({
+      ...SAMPLE_MAILBOX,
+      id: address,
+      address,
+    }));
+
+    await handleInbound(msg, env, [
+      "priss@movo.com.my",
+      "suzanne@movo.com.my",
+    ]);
+
+    const storedAddresses = vi
+      .mocked(db.insertInboundMessage)
+      .mock.calls.map((call) => call[1].mailboxAddress);
+    const ids = vi
+      .mocked(db.insertInboundMessage)
+      .mock.calls.map((call) => call[2]);
+
+    expect(storedAddresses).toEqual([
+      "support@movo.com.my",
+      "priss@movo.com.my",
+      "suzanne@movo.com.my",
+    ]);
+    expect(new Set(ids).size).toBe(3);
+    expect(puts.filter((put) => put.key.startsWith("msg/")).length).toBe(3);
+  });
+
   it("carries threading headers (In-Reply-To / References) for replies", async () => {
     const { bucket } = makeR2();
     const env = makeEnv(bucket);
