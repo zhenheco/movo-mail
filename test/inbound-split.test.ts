@@ -93,6 +93,59 @@ describe("email() inbound split", () => {
     expect(forward).not.toHaveBeenCalled();
   });
 
+  it("stores routed mail with CF copies before forwarding it to Microsoft 365", async () => {
+    vi.mocked(isManagedAddress).mockResolvedValue(true);
+    const forward = vi.fn().mockResolvedValue(undefined);
+    const message = fakeMessage("hello@movo.com.my", forward);
+    const { ctx, waitUntil, settle } = fakeCtx();
+
+    await worker.email!(message, env, ctx);
+    await settle();
+
+    expect(handleInbound).toHaveBeenCalledWith(message, env, [
+      "priss@movo.com.my",
+      "suzanne@movo.com.my",
+    ]);
+    expect(handleInbound).toHaveBeenCalledTimes(1);
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(forward).toHaveBeenCalledWith("hello@movocommy.onmicrosoft.com");
+  });
+
+  it("routes the customer service address and keeps the Priss/Suzanne copies", async () => {
+    vi.mocked(isManagedAddress).mockResolvedValue(true);
+    const forward = vi.fn().mockResolvedValue(undefined);
+    const message = fakeMessage("customerservice@movo.com.my", forward);
+    const { ctx, settle } = fakeCtx();
+
+    await worker.email!(message, env, ctx);
+    await settle();
+
+    expect(handleInbound).toHaveBeenCalledWith(message, env, [
+      "priss@movo.com.my",
+      "suzanne@movo.com.my",
+    ]);
+    expect(forward).toHaveBeenCalledWith(
+      "customerservice@movocommy.onmicrosoft.com",
+    );
+  });
+
+  it.each([
+    "finance@movo.com.my",
+    "refund@movo.com.my",
+    "merchantpayment@movo.com.my",
+    "movopartnerpayment@movo.com.my",
+  ])("routes %s to the Finance Microsoft 365 mailbox", async (recipient) => {
+    vi.mocked(isManagedAddress).mockResolvedValue(true);
+    const forward = vi.fn().mockResolvedValue(undefined);
+    const message = fakeMessage(recipient, forward);
+    const { ctx, settle } = fakeCtx();
+
+    await worker.email!(message, env, ctx);
+    await settle();
+
+    expect(forward).toHaveBeenCalledWith("finance@movocommy.onmicrosoft.com");
+  });
+
   it("forwards non-managed mail to FALLBACK_FORWARD exactly once and does NOT store", async () => {
     vi.mocked(isManagedAddress).mockResolvedValue(false);
     const forward = vi.fn().mockResolvedValue(undefined);
